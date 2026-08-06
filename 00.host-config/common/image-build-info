@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# image-build-info
+#
+# Print the image identity and build timestamp. With --manifest, print the full
+# build manifest instead. The no-argument output matches the WSL base image, so
+# one command behaves the same on a WSL distro and a VM guest.
+set -euo pipefail
+
+ENV_FILE="/etc/image-build-info.env"
+MANIFEST_FILE="/etc/image-build-manifest.json"
+
+if [[ "${1:-}" == "--manifest" ]]; then
+    if [[ ! -f "${MANIFEST_FILE}" ]]; then
+        echo "Error: ${MANIFEST_FILE} not found" >&2
+        exit 1
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -m json.tool "${MANIFEST_FILE}"
+    else
+        cat "${MANIFEST_FILE}"
+    fi
+    exit 0
+fi
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+    echo "Error: ${ENV_FILE} not found" >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+source "${ENV_FILE}"
+printf "%s\n" "${IMAGE_INFO}"
+printf "%s\n" "${BUILD_TIMESTAMP}"

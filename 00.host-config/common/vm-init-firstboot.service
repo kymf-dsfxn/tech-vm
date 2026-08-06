@@ -1,0 +1,15 @@
+[Unit]
+Description=Q-Free VM first-boot provisioning (data disk, HGFS shared folder)
+Documentation=file:///opt/vm-init/guest-firstboot.sh
+After=multi-user.target vmtoolsd.service
+Wants=vmtoolsd.service
+ConditionPathExists=!/var/lib/vm-init/firstboot.done
+
+[Service]
+Type=oneshot
+ExecStart=/opt/vm-init/guest-firstboot.sh
+RemainAfterExit=no
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

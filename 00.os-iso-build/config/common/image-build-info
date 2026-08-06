@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ ! -f /etc/image-build-info.env ]]; then
-  echo "Error: /etc/image-build-info.env not found" >&2
-  exit 1
-fi
-source /etc/image-build-info.env
-printf "%s\n" "${IMAGE_INFO}"
-printf "%s\n" "${BUILD_TIMESTAMP}"

@@ -1,0 +1,31 @@
+# packages.list
+#
+# Every apt package the guest installs, one per line. Comments start with '#'.
+# build-package-repo.sh resolves the dependency closure of this list on a host
+# that matches the target (Ubuntu 26.04 amd64) and stages it as an on-ISO apt
+# repository. guest-install.sh installs exactly these names from that repo, with
+# no network. Keep the list as the single source of truth for guest packages.
+
+# Base utilities and the VMware guest agent (formerly the late-commands list)
+open-vm-tools
+less
+tree
+nano
+dos2unix
+iputils-ping
+pv
+unzip
+pigz
+figlet
+locales
+
+# Developer toolchain (formerly installed by setup-vm.sh)
+git
+openjdk-25-jdk-headless
+python3
+python3-build
+python3-venv
+apt-rdepends
+podman
+uidmap
+passt

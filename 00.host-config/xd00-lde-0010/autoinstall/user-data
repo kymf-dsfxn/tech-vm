@@ -1,0 +1,53 @@
+#cloud-config
+autoinstall:
+  version: 1
+
+  locale: en_US.UTF-8
+
+  keyboard:
+    layout: us
+
+  source:
+    id: ubuntu-server-minimal
+
+  network:
+    version: 2
+    ethernets:
+      ens192:
+        addresses:
+          - 10.66.81.101/24
+        routes:
+          - to: default
+            via: 10.66.81.2
+        nameservers:
+          addresses:
+            - 10.66.81.2
+
+  storage:
+    layout:
+      name: direct
+      match:
+        size: smallest
+
+  identity:
+    hostname: xd00-lde-0010
+    realname: recovery
+    username: recovery
+    password: "$6$ytzm4adGzWN/BtxW$.mknVc68BfA1A8tF8kxfVdAnVjK212fnyBSndomLjaaN/Aj.hl.gxSW7ZcyEZ4Cqsrxwegp.unzW8YC77jOlm0"
+
+  ssh:
+    install-server: true
+    allow-pw: true
+
+  late-commands:
+    #  Copy the vm-init payload (scripts, on-ISO apt repo, artefacts, metadata)
+    #  from the mounted ISO into the target.
+    - mkdir -p /target/opt/vm-init
+    - cp -a /cdrom/autoinstall/vm-init/. /target/opt/vm-init/
+
+    #  Run install-time provisioning inside the target. This is offline: it
+    #  installs every package from /opt/vm-init/apt-repo, places the payload,
+    #  creates the users, writes the build metadata and manifest, and enables the
+    #  first-boot unit that provisions the data disk and the HGFS mount.
+    - curtin in-target --target=/target -- /opt/vm-init/guest-install.sh
+

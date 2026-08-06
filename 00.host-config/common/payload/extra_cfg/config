@@ -1,0 +1,13 @@
+# Repos for dsfxn
+Host github-dsfxn
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/kymf.disfixian-github.id_ed25519
+    IdentitiesOnly yes
+
+# Repo qfree
+Host github-qf
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_eddsa.kym.farrell@q-free.com.openssh-private
+    IdentitiesOnly yes
