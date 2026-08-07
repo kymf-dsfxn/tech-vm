@@ -28,6 +28,7 @@ PAYLOAD_DEB="${VM_INIT_DIR}/extra_deb"
 PAYLOAD_TGZ="${VM_INIT_DIR}/extra_tgz"
 PAYLOAD_KEYS="${VM_INIT_DIR}/extra_keys"
 PACKAGES_LIST="${VM_INIT_DIR}/packages.list"
+BUILD_TOOLS_DIR="${VM_INIT_DIR}/build-tools"
 
 NAMED_USER="kymf"
 
@@ -161,6 +162,39 @@ else
     info "No Liquibase tarball in payload, skipping"
 fi
 
+# --- Standalone build tools (syft, shfmt, uv) --------------------------------
+# Pinned binaries fetched at ISO-build time by fetch-build-tools.sh and staged
+# under build-tools/bin. They are not apt packages, so they are copied straight
+# into /usr/local/bin here. syft is required by the Python SBOM step; shfmt and
+# uv complete the local Python/shell build toolchain.
+log "Install standalone build tools"
+if [[ -d "${BUILD_TOOLS_DIR}/bin" ]]; then
+    install -m 0755 "${BUILD_TOOLS_DIR}/bin/"* /usr/local/bin/
+    info "Installed: $(find "${BUILD_TOOLS_DIR}/bin" -maxdepth 1 -type f -printf '%f ' 2>/dev/null)"
+else
+    info "No build-tools payload, skipping (syft/shfmt/uv will be absent)"
+fi
+
+# --- Rootless podman socket (Docker-API compatibility) -----------------------
+# Enable the per-user podman socket for every user so Docker-API clients
+# (Testcontainers, the fabric8 docker-maven-plugin) can reach a daemonless
+# engine. `--global` writes user-unit symlinks only; it needs no running
+# systemd, so it is safe in this install-time chroot. The socket activates in
+# each user's systemd session at login. See the project's build-container
+# socket decision note for why this lives on the VM and not in wsl-kf.
+log "Enable rootless podman socket for all users"
+if [[ -f /usr/lib/systemd/user/podman.socket ]]; then
+    systemctl --global enable podman.socket || info "podman.socket enable failed"
+    # Point Docker-API clients at the rootless socket. $(id -u) stays literal so
+    # it resolves per-user at login.
+    printf 'export DOCKER_HOST="unix:///run/user/$(id -u)/podman/podman.sock"\n' \
+        > /etc/profile.d/podman-docker-host.sh
+    chmod 0644 /etc/profile.d/podman-docker-host.sh
+    info "podman.socket enabled globally; DOCKER_HOST set via profile.d"
+else
+    info "podman.socket unit not found, skipping"
+fi
+
 # --- Company CA (from payload .deb) ------------------------------------------
 log "Install company CA certificate"
 CA_DEB="$(find "${PAYLOAD_DEB}" -maxdepth 1 -name 'ca-certificates-qfree_*_all.deb' | head -1)"
@@ -198,6 +232,6 @@ systemctl enable vm-init-firstboot.service
 # --- Reclaim space: drop the repo, tarballs and debs; keep the scripts -------
 log "Clean up install-only payload"
 rm -f /etc/apt/sources.list.d/vm-init-local.list
-rm -rf "${APT_REPO_DIR}" "${PAYLOAD_TGZ}" "${PAYLOAD_DEB}"
+rm -rf "${APT_REPO_DIR}" "${PAYLOAD_TGZ}" "${PAYLOAD_DEB}" "${BUILD_TOOLS_DIR}"
 
 log "Guest install complete"

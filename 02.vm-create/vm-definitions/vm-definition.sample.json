@@ -1,7 +1,9 @@
 {
   "VmName": "kymf-xd00-lde-0010",
   "VmRootPath": "C:\\local-data\\k-vm",
-  "IsoPath": "C:\\iso\\ubuntu-26.04-live-server-amd64.iso",
+  "IsoPath": null,
+  "IsoDir": null,
+  "IsoHost": null,
   "CpuCount": 4,
   "CoresPerSocket": 4,
   "MemoryMB": 12288,
@@ -26,4 +28,4 @@
   "EnableHostSharedFolder": true,
   "HostSharedFolderPath": "S:\\local-data",
   "HostSharedFolderName": "local-data"
-}
+}

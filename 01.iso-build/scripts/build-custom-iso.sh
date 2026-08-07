@@ -68,6 +68,7 @@ HOST_CONFIG_DIR="${TECH_VM_DIR}/00.host-config"
 
 OUTPUT_DIR="${3:-${BUILD_DIR}/output}"
 APT_REPO_DIR="${APT_REPO_DIR:-${BUILD_DIR}/.cache/apt-repo}"
+BUILD_TOOLS_DIR="${BUILD_TOOLS_DIR:-${BUILD_DIR}/.cache/build-tools}"
 
 COMMON_DIR="${HOST_CONFIG_DIR}/common"
 AUTOINSTALL_DIR="${HOST_CONFIG_DIR}/${TARGET_HOSTNAME}/autoinstall"
@@ -99,6 +100,8 @@ for asset in "${COMMON_ASSETS[@]}"; do
 done
 [[ -d "${APT_REPO_DIR}" && -f "${APT_REPO_DIR}/Packages" ]] \
   || _die "Offline apt repo not found at ${APT_REPO_DIR}. Build it: ${SCRIPT_DIR}/build-package-repo.sh"
+[[ -d "${BUILD_TOOLS_DIR}/bin" ]] \
+  || _die "Build tools not found at ${BUILD_TOOLS_DIR}. Fetch them: ${SCRIPT_DIR}/fetch-build-tools.sh"
 command -v xorriso &>/dev/null || _die "xorriso not installed. apt install xorriso"
 command -v python3 &>/dev/null || _die "python3 not installed."
 
@@ -169,6 +172,9 @@ chmod 0755 "${VM_INIT_STAGE}/guest-install.sh" \
 
 # Offline apt repo
 cp -a "${APT_REPO_DIR}" "${VM_INIT_STAGE}/apt-repo"
+
+# Standalone build tools (syft, shfmt, uv) fetched by fetch-build-tools.sh
+cp -a "${BUILD_TOOLS_DIR}" "${VM_INIT_STAGE}/build-tools"
 
 # Build metadata (identity + assembly timestamp)
 printf '%s\n' \

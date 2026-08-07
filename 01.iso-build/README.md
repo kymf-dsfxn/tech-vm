@@ -22,7 +22,10 @@ Build the offline repo once, then build an ISO per host.
 # 1. Fetch the package closure into an offline repo (needs docker or podman)
 ./scripts/build-package-repo.sh
 
-# 2. Build a host ISO
+# 2. Fetch the pinned standalone build tools (syft, shfmt, uv; needs curl)
+./scripts/fetch-build-tools.sh
+
+# 3. Build a host ISO
 ./scripts/build-custom-iso.sh xd00-lde-0010 ~/iso/ubuntu-26.04-live-server-amd64.iso
 
 # Build all hosts
@@ -31,8 +34,9 @@ for host in xd00-lde-0010 xd00-lde-0020 xd00-lde-0030; do
 done
 ```
 
-Rebuild the repo only when `packages.list` changes. The repo is cached under
-`.cache/apt-repo` and is not committed to git.
+Rebuild the repo only when `packages.list` changes. Refetch the build tools only
+when a pin in `fetch-build-tools.sh` changes. Both are cached under `.cache`
+(`.cache/apt-repo`, `.cache/build-tools`) and are not committed to git.
 
 ## The offline apt repository
 
@@ -47,10 +51,23 @@ A later phase may replace the build-time fetch with a managed repository
 artefact that has its own life cycle. The interface stays the same: a repo dir
 with a `Packages` index.
 
+## Standalone build tools
+
+syft, shfmt and uv are not in apt, so they cannot come from the offline repo.
+`fetch-build-tools.sh` downloads them with checksum verification into
+`.cache/build-tools/bin`. syft and shfmt are pinned to the exact version and
+sha256 the sdlc build images use; uv is pinned to a version and verified against
+its published `.sha256` sidecar (leave `UV_VERSION=latest` to resolve the newest
+tag, or pass `--uv-version` to pin). `build-custom-iso.sh` copies the tree onto
+the ISO under `/autoinstall/vm-init/build-tools`, and `guest-install.sh` installs
+the binaries into `/usr/local/bin` with no network. These give the guest a full
+local Python build (syft for the SBOM step) and Python/shell tooling (uv, shfmt).
+
 ## Requirements
 
 - `xorriso` and `python3` for the ISO build.
 - `docker` or `podman` for the package fetch.
+- `curl` for the build-tools fetch.
 - A stock Ubuntu 26.04 Live Server ISO.
 
 ## Build metadata and the manifest
@@ -65,7 +82,7 @@ Inside a built VM:
 
 ```bash
 image-build-info
-# vm-ubuntu-26.04-xd00-lde-0010-2.1.0-amd64
+# vm-ubuntu-26.04-xd00-lde-0010-2.2.0-amd64
 # 20260806T101500Z
 
 image-build-info --manifest

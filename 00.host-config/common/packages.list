@@ -29,3 +29,14 @@ apt-rdepends
 podman
 uidmap
 passt
+
+# Local-build toolchain. Lets the VM run full local builds of the code the sdlc
+# build images cover (Python utilities under tsdev-utilities, bash build-scripts
+# under tsdev-sdlc-tools), matching what those images install.
+#   python3-pip  - the Python SBOM step builds a throwaway venv and runs
+#                  `pip install`/`pip freeze` (common-generate-python-sbom.sh).
+#   shellcheck   - bash static analysis for script-type (build-scripts) builds.
+# Non-apt build tools (syft, shfmt, uv) are pinned binaries staged on the ISO by
+# fetch-build-tools.sh + guest-install.sh, not installed from this list.
+python3-pip
+shellcheck

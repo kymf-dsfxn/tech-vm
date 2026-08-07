@@ -1,7 +1,6 @@
 {
   "VmName": "kymf-xd00-lde-0030",
   "VmRootPath": "C:\\local-data\\k-vm",
-  "IsoPath": "C:\\local-data\\tmp-scratch\\ubuntu-26.04-live-server-amd64_xd00-lde-0030.iso",
   "CpuCount": 1,
   "CoresPerSocket": 4,
   "MemoryMB": 12288,
