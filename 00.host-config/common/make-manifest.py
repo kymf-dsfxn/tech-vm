@@ -10,10 +10,13 @@ moments, the same split the build metadata uses for its timestamps:
 
   apply      In the guest, at install. Copies the planned manifest, then records
              what actually landed: the installed version of each package as dpkg
-             reports it, and the install timestamp.
+             reports it, the platform namespace the guest was built for, and the
+             install timestamp.
 
-  firstboot  In the guest, at first boot. Adds the runtime results: the data
-             disk UUID and the HGFS mount status.
+  firstboot  In the guest, at first boot. Adds the runtime results: which state
+             the encrypted data disk was found in, and its identifiers. First
+             boot never unlocks the disk, so the filesystem UUID is only present
+             if something had already unlocked it.
 
 The manifest is a single JSON file. It is read by `image-build-info --manifest`.
 """
@@ -112,6 +115,7 @@ def cmd_apply(args):
     packages = _read_packages(args.packages)
     manifest["applied"] = {
         "install_timestamp": _now(),
+        "platform_namespace": args.platform_namespace or None,
         "packages": [
             {"name": name, "version": _dpkg_version(name)}
             for name in packages
@@ -124,8 +128,14 @@ def cmd_firstboot(args):
     manifest = _load(args.out)
     manifest["firstboot"] = {
         "firstboot_timestamp": _now(),
-        "data_disk_uuid": args.data_uuid or None,
-        "hgfs_status": args.hgfs_status,
+        "data_disk": {
+            "device": args.data_device or None,
+            "partition": args.data_partition or None,
+            "state": args.data_state or "unknown",
+            "luks_name": args.luks_name or None,
+            "luks_uuid": args.luks_uuid or None,
+            "filesystem_uuid": args.data_uuid or None,
+        },
     }
     _write(manifest, args.out)
 
@@ -161,13 +171,22 @@ def main():
     p_apply = sub.add_parser("apply", help="guest: record applied packages")
     p_apply.add_argument("--planned", required=True)
     p_apply.add_argument("--packages", required=True)
+    p_apply.add_argument("--platform-namespace", default="",
+                         help="platform_namespace label this guest was built for")
     p_apply.add_argument("--out", required=True)
     p_apply.set_defaults(func=cmd_apply)
 
     p_fb = sub.add_parser("firstboot", help="guest: record first-boot result")
     p_fb.add_argument("--out", required=True)
-    p_fb.add_argument("--data-uuid", default="")
-    p_fb.add_argument("--hgfs-status", default="unknown")
+    p_fb.add_argument("--data-device", default="", help="data disk block device")
+    p_fb.add_argument("--data-partition", default="", help="data disk partition")
+    p_fb.add_argument("--data-state", default="",
+                      choices=["", "absent", "uninitialised", "locked", "opened", "unlocked"],
+                      help="data disk state as guest-firstboot.sh classified it")
+    p_fb.add_argument("--luks-name", default="", help="dm-crypt mapper name")
+    p_fb.add_argument("--luks-uuid", default="", help="LUKS header UUID")
+    p_fb.add_argument("--data-uuid", default="",
+                      help="ext4 filesystem UUID (only knowable while unlocked)")
     p_fb.set_defaults(func=cmd_firstboot)
 
     args = parser.parse_args()

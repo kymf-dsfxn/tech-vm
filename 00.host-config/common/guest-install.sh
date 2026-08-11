@@ -8,11 +8,14 @@
 # are guest paths and the network is not required.
 #
 # It installs every package from the on-ISO apt repo, places the payload files,
-# creates the users, sets the locale, unpacks Maven and Liquibase, installs the
-# company CA, writes the MOTD banner, and records the build metadata and the
-# applied manifest. It does not touch the data disk or the HGFS mount. Those
-# need the running kernel and the VMware tools, so guest-firstboot.sh does them
-# at first boot.
+# establishes the platform layer identity (the platform_namespace users and
+# groups, recorded in /etc/platform.env), sets the locale, unpacks Maven and
+# Liquibase, installs the company CA, writes the MOTD banner, and records the
+# build metadata and the applied manifest. It also installs the data-disk
+# lifecycle command and the noauto fstab entry the encrypted data disk mounts
+# through, but it never touches the disk itself: detection needs the running
+# kernel, so guest-firstboot.sh classifies it at first boot, and unlocking is an
+# operator action over SSH.
 #
 # The script is idempotent enough to re-run during development, but it is meant
 # to run once, at install.
@@ -31,6 +34,22 @@ PACKAGES_LIST="${VM_INIT_DIR}/packages.list"
 BUILD_TOOLS_DIR="${VM_INIT_DIR}/build-tools"
 
 NAMED_USER="kymf"
+
+# --- Platform layer identity -------------------------------------------------
+# OS-level customisations and service deployment choices belong to the platform
+# layer. One label, the platform_namespace, derives all of it: the platform
+# shared user and group, the <namespace>_node_mgmt node management user and
+# group, and the platform shared data root. This is the single place the label
+# is written; guest-firstboot.sh and /usr/local/bin/data-disk read it back from
+# /etc/platform.env. UID/GID are pinned so a data disk carried between nodes
+# keeps valid file ownership across a rename.
+PLATFORM_ENV="/etc/platform.env"
+PLATFORM_NAMESPACE="dsfxn"
+PLATFORM_CORE_USER="${PLATFORM_NAMESPACE}"
+PLATFORM_CORE_UID=500
+PLATFORM_NODE_MGMT_USER="${PLATFORM_NAMESPACE}_node_mgmt"
+PLATFORM_NODE_MGMT_UID=501
+PLATFORM_DATA_ROOT="/srv/${PLATFORM_NAMESPACE}"
 
 log()  { echo "==> $*"; }
 info() { echo "    $*"; }
@@ -85,30 +104,53 @@ find /usr/share/i18n/locales -mindepth 1 -maxdepth 1 -type f \
     ! -name 'en_US' ! -name 'C' ! -name 'POSIX' -exec rm -f {} +
 
 # --- Users -------------------------------------------------------------------
-log "Create platform users"
+log "Create platform users (namespace ${PLATFORM_NAMESPACE})"
 
-# Platform admin (qfree, 500)
-groupadd --gid 500 qfree
-useradd --comment qfree --create-home --system --shell /bin/bash \
-    --uid 500 --gid 500 --groups sudo qfree
-printf 'qfree ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/010-qfree-nopw
-chmod 0440 /etc/sudoers.d/010-qfree-nopw
+# Record the platform layer identity first, so it is on disk for the guest-side
+# consumers even if a later step of this script fails. Plain KEY=value: safe to
+# source from bash, parseable by anything else.
+cat > "${PLATFORM_ENV}" <<EOF
+# Platform layer identity for this node. Written by guest-install.sh.
+# One label, the platform_namespace, derives the rest.
+PLATFORM_NAMESPACE=${PLATFORM_NAMESPACE}
+PLATFORM_CORE_USER=${PLATFORM_CORE_USER}
+PLATFORM_CORE_UID=${PLATFORM_CORE_UID}
+PLATFORM_NODE_MGMT_USER=${PLATFORM_NODE_MGMT_USER}
+PLATFORM_NODE_MGMT_UID=${PLATFORM_NODE_MGMT_UID}
+PLATFORM_DATA_ROOT=${PLATFORM_DATA_ROOT}
+EOF
+chmod 0644 "${PLATFORM_ENV}"
+info "Wrote ${PLATFORM_ENV}"
 
-# Node management (qf_node_mgmt, 501)
-groupadd --gid 501 qf_node_mgmt
-useradd --comment qf_node_mgmt --create-home --system --shell /bin/bash \
-    --uid 501 --gid 501 --groups qfree,sudo qf_node_mgmt
-printf 'qf_node_mgmt ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/010-qf_node_mgmt-nopw
-chmod 0440 /etc/sudoers.d/010-qf_node_mgmt-nopw
-install --directory --mode=0700 --owner=qf_node_mgmt --group=qf_node_mgmt \
-    /home/qf_node_mgmt/.ssh
-printf '# PLACEHOLDER\n' > /home/qf_node_mgmt/.ssh/authorized_keys
-chmod 0600 /home/qf_node_mgmt/.ssh/authorized_keys
-chown qf_node_mgmt:qf_node_mgmt /home/qf_node_mgmt/.ssh/authorized_keys
+# Platform layer shared user & group (${PLATFORM_CORE_USER}, 500)
+groupadd --gid "${PLATFORM_CORE_UID}" "${PLATFORM_CORE_USER}"
+useradd --comment "${PLATFORM_CORE_USER}" --create-home --system --shell /bin/bash \
+    --uid "${PLATFORM_CORE_UID}" --gid "${PLATFORM_CORE_UID}" --groups sudo \
+    "${PLATFORM_CORE_USER}"
+printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${PLATFORM_CORE_USER}" \
+    > "/etc/sudoers.d/010-${PLATFORM_CORE_USER}-nopw"
+chmod 0440 "/etc/sudoers.d/010-${PLATFORM_CORE_USER}-nopw"
 
-# Named user (kymf, auto UID/GID). Key comes from the payload, not inline.
+# Platform layer node management user & group (${PLATFORM_NODE_MGMT_USER}, 501)
+groupadd --gid "${PLATFORM_NODE_MGMT_UID}" "${PLATFORM_NODE_MGMT_USER}"
+useradd --comment "${PLATFORM_NODE_MGMT_USER}" --create-home --system --shell /bin/bash \
+    --uid "${PLATFORM_NODE_MGMT_UID}" --gid "${PLATFORM_NODE_MGMT_UID}" \
+    --groups "${PLATFORM_CORE_USER}",sudo "${PLATFORM_NODE_MGMT_USER}"
+printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${PLATFORM_NODE_MGMT_USER}" \
+    > "/etc/sudoers.d/010-${PLATFORM_NODE_MGMT_USER}-nopw"
+chmod 0440 "/etc/sudoers.d/010-${PLATFORM_NODE_MGMT_USER}-nopw"
+install --directory --mode=0700 \
+    --owner="${PLATFORM_NODE_MGMT_USER}" --group="${PLATFORM_NODE_MGMT_USER}" \
+    "/home/${PLATFORM_NODE_MGMT_USER}/.ssh"
+printf '# PLACEHOLDER\n' > "/home/${PLATFORM_NODE_MGMT_USER}/.ssh/authorized_keys"
+chmod 0600 "/home/${PLATFORM_NODE_MGMT_USER}/.ssh/authorized_keys"
+chown "${PLATFORM_NODE_MGMT_USER}:${PLATFORM_NODE_MGMT_USER}" \
+    "/home/${PLATFORM_NODE_MGMT_USER}/.ssh/authorized_keys"
+
+# Named user (kymf, auto UID/GID). A person, not a platform concept: the name
+# stays as it is, only the platform group it joins is derived.
 useradd --comment "${NAMED_USER}" --create-home --shell /bin/bash \
-    --groups qfree,sudo "${NAMED_USER}"
+    --groups "${PLATFORM_CORE_USER}",sudo "${NAMED_USER}"
 printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${NAMED_USER}" \
     > "/etc/sudoers.d/011-${NAMED_USER}-nopw"
 chmod 0440 "/etc/sudoers.d/011-${NAMED_USER}-nopw"
@@ -205,12 +247,35 @@ else
     info "No CA .deb in payload, skipping"
 fi
 
+# --- Data disk lifecycle command ---------------------------------------------
+# The data disk is LUKS encrypted and is never unlocked at boot: no crypttab
+# entry, and a noauto fstab entry so nothing pulls the mount into
+# local-fs.target. An operator unlocks it deliberately over SSH with
+# `sudo data-disk unlock`. The fstab entry is written here rather than at first
+# boot so the mount options, and the srv-<namespace>.mount unit systemd derives
+# from them, exist from image build onwards.
+log "Install the data disk lifecycle command"
+install -m 0755 "${VM_INIT_DIR}/data-disk" /usr/local/bin/data-disk
+DATA_FSTAB_LINE="/dev/mapper/${PLATFORM_NAMESPACE}_data ${PLATFORM_DATA_ROOT} ext4 noauto 0 0"
+if ! grep -qF " ${PLATFORM_DATA_ROOT} " /etc/fstab 2> /dev/null; then
+    printf '%s\n' "${DATA_FSTAB_LINE}" >> /etc/fstab
+    info "Added noauto fstab entry for ${PLATFORM_DATA_ROOT}"
+fi
+# The bare mountpoint stays closed while the disk is locked, so nothing can
+# write into it and have those writes land on the OS disk.
+install -d -o root -g root -m 0500 "${PLATFORM_DATA_ROOT}"
+
 # --- MOTD banner (derived from the hostname) ---------------------------------
 log "Write MOTD banner"
 rm -f /etc/update-motd.d/10-help-text /etc/update-motd.d/60-unminimize
 printf '#!/bin/bash\nfiglet -k "%s" && figlet -k "%s"\n' \
     "${INSTANCE_ENV}" "${HOST_ID}" > /etc/update-motd.d/99-banner
 chmod 0755 /etc/update-motd.d/99-banner
+# With manual unlock, "is the data disk up right now?" is the first thing an
+# operator wants to know at login.
+printf '#!/bin/bash\n/usr/local/bin/data-disk status --brief\n' \
+    > /etc/update-motd.d/98-data-disk
+chmod 0755 /etc/update-motd.d/98-data-disk
 
 # --- Build metadata and applied manifest -------------------------------------
 log "Record build metadata and manifest"
@@ -221,7 +286,8 @@ printf 'INSTALL_TIMESTAMP=%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" \
 python3 "${VM_INIT_DIR}/make-manifest.py" apply \
     --planned "${VM_INIT_DIR}/build-manifest.json" \
     --out /etc/image-build-manifest.json \
-    --packages "${PACKAGES_LIST}"
+    --packages "${PACKAGES_LIST}" \
+    --platform-namespace "${PLATFORM_NAMESPACE}"
 
 # --- First-boot unit ---------------------------------------------------------
 log "Enable first-boot provisioning unit"

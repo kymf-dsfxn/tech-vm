@@ -13,8 +13,9 @@
 #     00.host-config/                 <- inputs (config + payload + scripts)
 #       build_version
 #       common/{grub.cfg.template,loopback.cfg,image-build-info,
-#               guest-install.sh,guest-firstboot.sh,make-manifest.py,
-#               vm-init-firstboot.service,packages.list,payload/...}
+#               guest-install.sh,guest-firstboot.sh,data-disk,
+#               make-manifest.py,vm-init-firstboot.service,packages.list,
+#               payload/...}
 #       <host>/autoinstall/{user-data,meta-data}
 #       <host>/payload/...            <- optional per-host payload overrides
 #     01.iso-build/
@@ -84,6 +85,7 @@ COMMON_ASSETS=(
   "image-build-info"
   "guest-install.sh"
   "guest-firstboot.sh"
+  "data-disk"
   "make-manifest.py"
   "vm-init-firstboot.service"
   "packages.list"
@@ -163,6 +165,7 @@ for asset in "${COMMON_ASSETS[@]}"; do
 done
 chmod 0755 "${VM_INIT_STAGE}/guest-install.sh" \
            "${VM_INIT_STAGE}/guest-firstboot.sh" \
+           "${VM_INIT_STAGE}/data-disk" \
            "${VM_INIT_STAGE}/make-manifest.py" \
            "${VM_INIT_STAGE}/image-build-info"
 

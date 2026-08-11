@@ -47,7 +47,8 @@ autoinstall:
 
     #  Run install-time provisioning inside the target. This is offline: it
     #  installs every package from /opt/vm-init/apt-repo, places the payload,
-    #  creates the users, writes the build metadata and manifest, and enables the
-    #  first-boot unit that provisions the data disk and the HGFS mount.
+    #  creates the platform users, writes the build metadata and manifest, and
+    #  enables the first-boot unit that detects the encrypted data disk and
+    #  configures its SMB share.
     - curtin in-target --target=/target -- /opt/vm-init/guest-install.sh
 

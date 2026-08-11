@@ -75,8 +75,9 @@ local Python build (syft for the SBOM step) and Python/shell tooling (uv, shfmt)
 The build reads `build_version`, generates a UTC timestamp, and computes the
 identity `vm-ubuntu-26.04-<host>-<version>-amd64`. It writes `build-info.env`
 and a planned `build-manifest.json` into the payload. The guest completes both:
-`guest-install.sh` records the installed package versions and the install
-moment, and `guest-firstboot.sh` records the data disk UUID and the HGFS status.
+`guest-install.sh` records the installed package versions, the platform
+namespace and the install moment, and `guest-firstboot.sh` records which state
+the encrypted data disk was found in.
 
 Inside a built VM:
 
@@ -102,5 +103,6 @@ stage 02 in step with what stage 01 produced, and closes the old name drift.
 3. The installer reads `/cdrom/autoinstall/user-data`.
 4. The late-commands copy the payload and run `guest-install.sh` in the target.
 5. The install finishes and the VM reboots.
-6. On first boot, `vm-init-firstboot.service` provisions the data disk and the
-   HGFS mount, then disables itself.
+6. On first boot, `vm-init-firstboot.service` detects the encrypted data disk
+   and configures the SMB share, then disables itself. It never prompts: the
+   data disk is unlocked later, by hand, with `sudo data-disk unlock`.

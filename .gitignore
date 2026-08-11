@@ -1,0 +1,23 @@
+# 01.iso-build: cached offline apt repo + build tools (rebuilt from packages.list)
+01.iso-build/.cache/
+
+# 01.iso-build: built ISOs + latest.txt pointer (rebuilt per host)
+01.iso-build/output/
+
+# ISO images and offline package artefacts, wherever fetched/built
+*.iso
+*.deb
+
+# Run logs (create-vm-instance.py / invoke-vmrun.py)
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp

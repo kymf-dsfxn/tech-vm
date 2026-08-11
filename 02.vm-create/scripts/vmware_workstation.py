@@ -10,10 +10,12 @@
 #   resolve_full_path        -- absolute, normalised path (Resolve-FullPath)
 #   resolve_vmware_binary    -- locate vmrun.exe / vmware-vdiskmanager.exe
 #   create_virtual_disk      -- vmware-vdiskmanager -c (New-VMwareVirtualDisk)
+#   copy_virtual_disk        -- attach an existing .vmdk by copying it in
 #   build_vmx_content        -- assemble the .vmx text (New-VMwareVmxContent)
 #   invoke_vmrun             -- run vmrun with an argument list (Invoke-VMwareVmrun)
 
 import os
+import re
 import shutil
 import subprocess
 
@@ -121,6 +123,101 @@ def create_virtual_disk(path: str, size_gb: int, vdiskmanager_path: str,
         )
 
 
+_DESCRIPTOR_MARKERS = (b"# Disk DescriptorFile", b"# Extent description")
+
+
+def _extent_names(descriptor_bytes: bytes) -> list:
+    """Extent .vmdk filenames referenced by a text disk descriptor.
+
+    Extent lines look like: RW 8388608 SPARSE "name-s001.vmdk"
+    Returns [] for a binary (monolithicSparse) file, which carries its data and
+    its embedded descriptor in the one file and references nothing external.
+    """
+    head = descriptor_bytes[:512]
+    if not any(marker in head for marker in _DESCRIPTOR_MARKERS):
+        return []
+    text = descriptor_bytes.decode("ascii", errors="replace")
+    return re.findall(r'^\s*(?:RW|RDONLY|NOACCESS)\s+\d+\s+\S+\s+"([^"]+\.vmdk)"',
+                      text, flags=re.MULTILINE | re.IGNORECASE)
+
+
+def copy_virtual_disk(source_path: str, target_path: str,
+                      dry_run: bool = False) -> None:
+    """Copy an existing virtual disk into a new VM directory under a new name.
+
+    Used to attach an already-provisioned data disk to a new VM instead of
+    creating a fresh one. Carries the same "disk already exists" guard as
+    create_virtual_disk(), which fires even in dry-run mode.
+
+    Handles both provisioning layouts:
+      monolithicSparse  One self-contained file. A straight copy.
+      splitSparse       A text descriptor plus -s###.vmdk extents. The extents
+                        are copied alongside under the new base name, and the
+                        descriptor's extent references are rewritten to match.
+                        Without that rewrite the copied descriptor would still
+                        name the source disk's extent files.
+    """
+    resolved_source = resolve_full_path(source_path)
+    resolved_target = resolve_full_path(target_path)
+
+    if not os.path.isfile(resolved_source):
+        raise FileNotFoundError(f"Source virtual disk does not exist: {resolved_source}")
+    if os.path.exists(resolved_target):
+        raise FileExistsError(f"Virtual disk already exists: {resolved_target}")
+
+    target_dir = os.path.dirname(resolved_target)
+    if not os.path.isdir(target_dir):
+        os.makedirs(target_dir, exist_ok=True)
+
+    source_dir = os.path.dirname(resolved_source)
+    source_stem = os.path.basename(resolved_source)[: -len(".vmdk")]
+    target_stem = os.path.basename(resolved_target)[: -len(".vmdk")]
+
+    with open(resolved_source, "rb") as handle:
+        descriptor_head = handle.read(4096)
+    extents = _extent_names(descriptor_head)
+
+    # A referenced extent that is not on disk means an incomplete source disk.
+    # Fail before copying anything rather than leaving a half-copied disk.
+    missing = [name for name in extents
+               if not os.path.isfile(os.path.join(source_dir, name))]
+    if missing:
+        raise FileNotFoundError(
+            f"Source disk {resolved_source} references extents that do not exist: "
+            + ", ".join(missing)
+        )
+
+    if dry_run:
+        print(f"  [dry-run] would copy existing disk: {resolved_source}")
+        print(f"  [dry-run]                       to: {resolved_target}")
+        for name in extents:
+            print(f"  [dry-run] would copy extent: {name} -> "
+                  f"{name.replace(source_stem, target_stem, 1)}")
+        if extents:
+            print(f"  [dry-run] would rewrite {len(extents)} extent reference(s) "
+                  f"in the copied descriptor")
+        return
+
+    print(f"  Copying existing disk: {resolved_source}")
+    print(f"                     to: {resolved_target}")
+    shutil.copy2(resolved_source, resolved_target)
+
+    for name in extents:
+        target_name = name.replace(source_stem, target_stem, 1)
+        shutil.copy2(os.path.join(source_dir, name),
+                     os.path.join(target_dir, target_name))
+        print(f"  Copied extent: {name} -> {target_name}")
+
+    if extents:
+        with open(resolved_target, "rb") as handle:
+            descriptor = handle.read()
+        descriptor = descriptor.replace(source_stem.encode("ascii"),
+                                        target_stem.encode("ascii"))
+        with open(resolved_target, "wb") as handle:
+            handle.write(descriptor)
+        print(f"  Rewrote {len(extents)} extent reference(s) in the descriptor")
+
+
 # -- VMX content ---------------------------------------------------------
 
 def _vmx_line(name: str, value) -> str:
@@ -168,18 +265,9 @@ def build_vmx_content(definition: dict) -> str:
     lines.append(_vmx_line("floppy0.present", "FALSE"))
     lines.append(_vmx_line("sound.present", "FALSE"))
 
-    hgfs_disable = "FALSE" if definition["EnableHostSharedFolder"] == "TRUE" else "TRUE"
-    lines.append(_vmx_line("isolation.tools.hgfs.disable", hgfs_disable))
-
-    if definition["EnableHostSharedFolder"] == "TRUE":
-        lines.append(_vmx_line("sharedFolder0.present", "TRUE"))
-        lines.append(_vmx_line("sharedFolder0.enabled", "TRUE"))
-        lines.append(_vmx_line("sharedFolder0.readAccess", "TRUE"))
-        lines.append(_vmx_line("sharedFolder0.writeAccess", "TRUE"))
-        lines.append(_vmx_line("sharedFolder0.hostPath", definition["HostSharedFolderPath"]))
-        lines.append(_vmx_line("sharedFolder0.guestName", definition["HostSharedFolderName"]))
-        lines.append(_vmx_line("sharedFolder0.expiration", "never"))
-        lines.append(_vmx_line("sharedFolder.maxNum", "1"))
+    # HGFS is disabled unconditionally. The guest reaches the platform data disk
+    # over SMB instead, so there are no host shared folders to configure.
+    lines.append(_vmx_line("isolation.tools.hgfs.disable", "TRUE"))
 
     lines.append(_vmx_line("mks.enable3d", "FALSE"))
     lines.append(_vmx_line("svga.vramSize", "8388608"))

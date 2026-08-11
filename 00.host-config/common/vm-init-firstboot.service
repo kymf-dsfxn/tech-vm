@@ -1,5 +1,5 @@
 [Unit]
-Description=Q-Free VM first-boot provisioning (data disk, HGFS shared folder)
+Description=Platform layer first-boot provisioning (data disk detection, SMB share)
 Documentation=file:///opt/vm-init/guest-firstboot.sh
 After=multi-user.target vmtoolsd.service
 Wants=vmtoolsd.service

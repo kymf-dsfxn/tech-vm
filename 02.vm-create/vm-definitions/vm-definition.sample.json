@@ -10,6 +10,7 @@
   "CoreDiskSizeGB": 32,
   "DataDiskCount": 1,
   "DataDiskSizeGB": 512,
+  "DataDiskSourcePath": null,
   "NetworkType": "bridged",
   "NetworkName": null,
   "GuestOs": "ubuntu-64",
@@ -24,8 +25,5 @@
   "DiskProvisioning": "monolithicSparse",
   "VdiskManagerPath": null,
   "EnableSecureBoot": false,
-  "DisableSideChannelMitigations": true,
-  "EnableHostSharedFolder": true,
-  "HostSharedFolderPath": "S:\\local-data",
-  "HostSharedFolderName": "local-data"
-}
+  "DisableSideChannelMitigations": true
+}

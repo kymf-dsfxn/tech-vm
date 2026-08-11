@@ -80,9 +80,7 @@ _SETTINGS = [
     ("VdiskManagerPath", "vdisk_manager_path", "str", None, False),
     ("EnableSecureBoot", "enable_secure_boot", "bool", False, False),
     ("DisableSideChannelMitigations", "disable_side_channel_mitigations", "bool", False, False),
-    ("EnableHostSharedFolder", "enable_host_shared_folder", "bool", True, False),
-    ("HostSharedFolderPath", "host_shared_folder_path", "str", r"S:\local-data", False),
-    ("HostSharedFolderName", "host_shared_folder_name", "str", "local-data", False),
+    ("DataDiskSourcePath", "data_disk_source_path", "str", None, False),
 ]
 
 _RANGES = {
@@ -264,13 +262,10 @@ def _add_domain_arguments(parser):
             group.add_argument(f"--disable-{flag_base}", dest=dest,
                                action="store_false", default=None, help="Disable UEFI secure boot")
 
-    shared = parser.add_mutually_exclusive_group()
-    shared.add_argument("--enable-host-shared-folder", dest="enable_host_shared_folder",
-                        action="store_true", default=None, help="Enable the host shared folder (default)")
-    shared.add_argument("--disable-host-shared-folder", dest="enable_host_shared_folder",
-                        action="store_false", default=None, help="Disable the host shared folder")
-    parser.add_argument("--host-shared-folder-path", help=r"Host path to share (default S:\local-data)")
-    parser.add_argument("--host-shared-folder-name", help="Guest name for the share (default local-data)")
+    parser.add_argument("--data-disk-source-path",
+                        help="Attach an existing data disk .vmdk instead of creating a fresh one; "
+                             "the descriptor and any -s*.vmdk extents are copied into the new VM "
+                             "directory (requires --data-disk-count 1)")
 
     parser.add_argument("--log-dir", help="Directory for the run log (default <vm-root-path>/logs)")
     parser.add_argument("--quiet", action="store_true", default=False,
@@ -440,11 +435,20 @@ def validate_settings(s, strict=False):
     if s["NetworkType"] == "custom" and not s["NetworkName"]:
         raise SettingError("NetworkName is required when NetworkType is custom.")
 
-    if s["EnableHostSharedFolder"]:
-        if not (s["HostSharedFolderPath"] or "").strip():
-            raise SettingError("HostSharedFolderPath is required when EnableHostSharedFolder is true.")
-        if not (s["HostSharedFolderName"] or "").strip():
-            raise SettingError("HostSharedFolderName is required when EnableHostSharedFolder is true.")
+    # Attaching an existing data disk is a single-disk operation: the source
+    # descriptor maps onto exactly one data-disk slot.
+    source_path = (s["DataDiskSourcePath"] or "").strip()
+    if source_path:
+        if s["DataDiskCount"] != 1:
+            raise SettingError(
+                "DataDiskSourcePath requires DataDiskCount to be 1. "
+                f"Actual value: {s['DataDiskCount']}"
+            )
+        resolved_source = vmw.resolve_full_path(source_path)
+        if not os.path.isfile(resolved_source):
+            raise SettingError(f"DataDiskSourcePath not found: {resolved_source}")
+        if not resolved_source.lower().endswith(".vmdk"):
+            raise SettingError(f"DataDiskSourcePath must be a .vmdk file: {resolved_source}")
 
     warnings = []
     if s["CoresPerSocket"] and (s["CpuCount"] % s["CoresPerSocket"]) != 0:
@@ -615,21 +619,35 @@ def _cmd_run(args, settings, resolved_vm_root, config):
     disks.append({"FileName": core_disk_name, "Path": core_disk_path,
                   "SizeGB": settings["CoreDiskSizeGB"]})
 
+    # DataDiskSourcePath attaches an existing disk instead of creating a fresh
+    # one. Validated in validate_settings(): set implies DataDiskCount == 1 and
+    # an existing .vmdk, so the single data-disk entry below is the target.
+    data_disk_source = (settings["DataDiskSourcePath"] or "").strip()
+    data_disk_source = vmw.resolve_full_path(data_disk_source) if data_disk_source else None
+
     for index in range(1, settings["DataDiskCount"] + 1):
         data_disk_name = "{0}-data-{1:02d}.vmdk".format(settings["VmName"], index)
         data_disk_path = os.path.join(vm_directory, data_disk_name)
         disks.append({"FileName": data_disk_name, "Path": data_disk_path,
-                      "SizeGB": settings["DataDiskSizeGB"]})
+                      "SizeGB": settings["DataDiskSizeGB"],
+                      "SourcePath": data_disk_source})
 
     if not args.skip_disk_creation:
         for disk in disks:
-            vmw.create_virtual_disk(
-                path=disk["Path"],
-                size_gb=disk["SizeGB"],
-                vdiskmanager_path=resolved_vdiskmanager,
-                provisioning=settings["DiskProvisioning"],
-                dry_run=args.dry_run,
-            )
+            if disk.get("SourcePath"):
+                vmw.copy_virtual_disk(
+                    source_path=disk["SourcePath"],
+                    target_path=disk["Path"],
+                    dry_run=args.dry_run,
+                )
+            else:
+                vmw.create_virtual_disk(
+                    path=disk["Path"],
+                    size_gb=disk["SizeGB"],
+                    vdiskmanager_path=resolved_vdiskmanager,
+                    provisioning=settings["DiskProvisioning"],
+                    dry_run=args.dry_run,
+                )
     else:
         print("  Disk creation skipped (--skip-disk-creation).")
 
@@ -653,9 +671,6 @@ def _cmd_run(args, settings, resolved_vm_root, config):
         "ScsiController": settings["ScsiController"],
         "Disks": disks,
         "IsoPath": resolved_iso,
-        "EnableHostSharedFolder": "TRUE" if settings["EnableHostSharedFolder"] else "FALSE",
-        "HostSharedFolderPath": settings["HostSharedFolderPath"],
-        "HostSharedFolderName": settings["HostSharedFolderName"],
     }
 
     vmx_content = vmw.build_vmx_content(definition)

@@ -40,3 +40,18 @@ passt
 # fetch-build-tools.sh + guest-install.sh, not installed from this list.
 python3-pip
 shellcheck
+
+# Data disk encryption + SMB file sharing
+#   cryptsetup-bin - the cryptsetup CLI only. Deliberately NOT the full
+#                    `cryptsetup` package: that adds initramfs hooks and
+#                    boot-time unlock machinery, and this data disk is never
+#                    unlocked at boot (see /usr/local/bin/data-disk).
+#   samba          - serves the platform data root to the Windows host. smbd
+#                    stays up whether or not the disk is unlocked; the share
+#                    stanza gates itself on the mount.
+#   psmisc         - fuser, used by `data-disk lock` to report or kill the
+#                    processes holding the mount. Not guaranteed present under
+#                    the minimised install (see payload/extra_cfg/apt-minimal.conf).
+cryptsetup-bin
+samba
+psmisc

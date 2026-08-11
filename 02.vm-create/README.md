@@ -30,7 +30,7 @@ host.
 - `vmxnet3` networking, `nat` by default
 - UEFI firmware, Secure Boot off
 - boot delay and side-channel mitigation options written into the `.vmx`
-- HGFS shared folder on by default (`S:\local-data` as `local-data`)
+- HGFS disabled unconditionally; the guest is reached over SMB instead
 
 Override any default from the command line or a JSON definition file.
 
@@ -121,11 +121,10 @@ name, then pass it with `--config`. The supported keys are:
 
 `VmName`, `VmRootPath`, `IsoPath`, `IsoDir`, `IsoHost`, `CpuCount`,
 `CoresPerSocket`, `MemoryMB`, `CoreDiskSizeGB`, `DataDiskCount`, `DataDiskSizeGB`,
-`NetworkType`, `NetworkName`, `GuestOs`, `Firmware`, `BootDelayMs`, `DisplayWidth`,
-`DisplayHeight`, `DisplayCount`, `NetworkAdapter`, `ScsiController`,
-`VirtualHardwareVersion`, `DiskProvisioning`, `VdiskManagerPath`,
-`EnableSecureBoot`, `DisableSideChannelMitigations`, `EnableHostSharedFolder`,
-`HostSharedFolderPath`, `HostSharedFolderName`.
+`DataDiskSourcePath`, `NetworkType`, `NetworkName`, `GuestOs`, `Firmware`,
+`BootDelayMs`, `DisplayWidth`, `DisplayHeight`, `DisplayCount`, `NetworkAdapter`,
+`ScsiController`, `VirtualHardwareVersion`, `DiskProvisioning`,
+`VdiskManagerPath`, `EnableSecureBoot`, `DisableSideChannelMitigations`.
 
 `VmName` and `VmRootPath` are required. The three ISO keys are optional: the
 per-host definitions leave them out and name the ISO on the command line, so a
@@ -134,24 +133,57 @@ only if you want the config to carry the ISO source. Some keys are constrained.
 `NetworkType` is one of `bridged`, `nat`, `hostonly`, or `custom`. `Firmware` is
 `efi` or `bios`. `NetworkName` is required when `NetworkType` is `custom`.
 
-## Shared folder
+## Data disk: fresh or attach an existing one
 
-VM creation emits VMware HGFS shared-folder settings by default, so the guest
-reaches the host tree at `.host:/local-data`:
+By default each data disk is created empty at `DataDiskSizeGB`. The guest then
+LUKS-encrypts it on first use (`sudo data-disk init` over SSH - see
+`00.host-config/README.md`).
 
-- `isolation.tools.hgfs.disable = "FALSE"`
-- `sharedFolder0.present = "TRUE"`
-- `sharedFolder0.enabled = "TRUE"`
-- `sharedFolder0.readAccess = "TRUE"`
-- `sharedFolder0.writeAccess = "TRUE"`
-- `sharedFolder0.hostPath = "S:\local-data"`
-- `sharedFolder0.guestName = "local-data"`
-- `sharedFolder0.expiration = "never"`
-- `sharedFolder.maxNum = "1"`
+To move an already-encrypted data disk onto a new VM, name it with
+`--data-disk-source-path`:
 
-Turn the folder off with `--disable-host-shared-folder`, or change the path and
-name with `HostSharedFolderPath` and `HostSharedFolderName`. `guest-firstboot.sh`
-in `00.host-config` mounts this share in the guest at `/mnt/s/local-data`.
+```bash
+uv run python scripts/create-vm-instance.py run \
+  --vm-name kymf-xd00-lde-0020 \
+  --vm-root-path C:\local-data\k-vm \
+  --data-disk-count 1 \
+  --data-disk-source-path C:\local-data\k-vm\kymf-xd00-lde-0010\kymf-xd00-lde-0010-data-01.vmdk
+```
+
+The source `.vmdk` is copied into the new VM directory under the new VM's
+standard data-disk name; it is never moved or modified. For a `splitSparse`
+source the `-s###.vmdk` extents are copied alongside and the descriptor's extent
+references are rewritten to the new base name, so the copy is self-contained.
+A source that references an extent which is not on disk fails before anything is
+copied.
+
+The setting requires `DataDiskCount` to be 1 - the source descriptor maps onto
+exactly one data-disk slot. Booting the new VM, `guest-firstboot.sh` detects the
+existing LUKS header and reports the disk as `locked`; `sudo data-disk init`
+refuses it, and `sudo data-disk unlock` with the original passphrase brings the
+data back. File ownership survives, because the platform UID/GID are pinned.
+
+## Host access to the guest data root
+
+HGFS is disabled unconditionally (`isolation.tools.hgfs.disable = "TRUE"`); the
+`local-data-s` and `local-data-c` shared folders are gone. If those host trees
+are still needed in the guest, that has to be solved separately.
+
+The guest data root is reached over SMB instead:
+
+```
+net use Z: \\<guest-ip>\dsfxn /user:kymf
+```
+
+Get the guest IP with `invoke-vmrun.py get-guest-ip`, or `get-host-ips.py` for
+the host side of the NAT segment. The default `nat` network is sufficient: the
+host holds an address on the same vmnet segment. `NetworkType bridged` remains
+available if reachability is a problem.
+
+The share only answers while the data disk is unlocked. With the disk locked,
+`smbd` is still running and reachable, but the share refuses the connection
+("network name not found") rather than letting a client write into the empty
+mountpoint. Unlock it in the guest with `sudo data-disk unlock`.
 
 ## Operate a VM
 
