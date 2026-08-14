@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+# =============================================================================
+# data-disk - operator lifecycle for the LUKS platform data disk.
+#
+#   init / unlock / lock / status
+#
+# Never unlocked at boot; the passphrase is only ever typed at this prompt and
+# is persisted nowhere. Platform identity comes from /etc/platform.env via
+# platform_node.py, both written/installed by guest-install.sh. Design:
+# capability.encrypted-datadisk.md.
+# =============================================================================
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+import platform_node as pn
+
+try:
+    _ENV = pn.load_platform_env()
+except pn.PlatformEnvError:
+    print(f"FATAL: {pn.PLATFORM_ENV_PATH} missing or unreadable", file=sys.stderr)
+    sys.exit(1)
+_D = pn.derived(_ENV)
+
+NAMESPACE = _D["namespace"]
+DATA_DEV = "/dev/sdb"
+DATA_PART = f"{DATA_DEV}1"
+DATA_LUKS_NAME = _D["luks_name"]
+DATA_MAPPER = f"/dev/mapper/{DATA_LUKS_NAME}"
+DATA_MOUNT = _D["data_root"]
+# The share replicates and is served over SMB; the state directory holds each
+# consumer's own state. sync-node reads the same two values from the same file.
+DATA_SHARE = _D["share"]
+DATA_STATE_DIR = _D["state_dir"]
+DATA_OWNER = _D["core_user"]
+DATA_GROUP = _D["core_user"]
+DATA_MODE = "2775"
+# Bare mountpoint mode while locked. Closed on purpose: writes there land on
+# the OS disk and shadow-read as a mass delete (the bare mountpoint invariant).
+DATA_MOUNT_LOCKED_MODE = "0500"
+
+NAMED_USER = _D["named_user"]
+
+# Services that consume the data root: `unlock` starts them, `lock` stops them
+# in reverse. Each needs a BindsTo drop-in on srv-<namespace>.mount so an
+# out-of-band umount takes it down too - the gated-service pattern in
+# capability.encrypted-datadisk.md. smbd is deliberately NOT listed: it stays
+# up and the share stanza gates itself.
+DATA_DISK_SERVICES = [f"syncthing@{_D['sync_user']}.service"]
+
+FORCE = False
+BRIEF = False
+
+_PROBES = pn.DiskProbes()
+
+
+def log(message):
+    print(f"==> {message}")
+
+
+def info(message):
+    print(f"    {message}")
+
+
+def warn(message):
+    print(f"    WARNING: {message}", file=sys.stderr)
+
+
+def die(message):
+    print(f"ERROR: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def usage(stream=None):
+    stream = stream if stream is not None else sys.stdout
+    print(f"""data-disk - platform data disk lifecycle (namespace {NAMESPACE})
+
+Usage: data-disk <command> [--force]
+
+Commands:
+  init      One-time per disk: partition {DATA_DEV}, luksFormat, mkfs.ext4.
+            Refuses a disk that already carries a LUKS header unless --force.
+  unlock    cryptsetup open, mount {DATA_MOUNT}, set permissions, start the
+            services gated on the mount.
+  lock      Stop the gated services, unmount, cryptsetup close. Refuses if the
+            mount is busy; --force kills the holders first.
+  status    Report the current state. The only command that runs without root,
+            but two facts need it and are reported as "not readable" rather than
+            guessed: the LUKS header, behind root:disk on {DATA_PART}, and the
+            Samba passdb. For the full picture: sudo data-disk status.
+            --brief prints a single line.
+
+The disk is never unlocked at boot. Every unlock is a deliberate act, and the
+passphrase is only ever typed at this prompt.""", file=stream)
+
+
+def run(cmd, **kwargs):
+    kwargs.setdefault("check", False)
+    return subprocess.run(cmd, **kwargs)
+
+
+def capture(cmd):
+    """Command stdout as stripped text, '' on any failure."""
+    try:
+        result = run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                     encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return (result.stdout or "").strip()
+
+
+def run_or_exit(cmd, **kwargs):
+    """Run a command whose failure should abort like `set -e`; the tool's own
+    stderr has already reached the terminal."""
+    result = run(cmd, **kwargs)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+    return result
+
+
+def current_user():
+    # pwd only exists on the guest; imported here so the file loads on the
+    # Windows dev host for tests.
+    import pwd
+    return pwd.getpwuid(os.geteuid()).pw_name
+
+
+def require_root(command):
+    if os.geteuid() != 0:
+        die(f"{command} needs root. Try: sudo data-disk {command}")
+
+
+# -- State ---------------------------------------------------------------------
+
+def dev_present():
+    return _PROBES.is_block_device(DATA_DEV)
+
+
+def part_present():
+    return _PROBES.is_block_device(DATA_PART)
+
+
+def is_open():
+    return _PROBES.is_block_device(DATA_MAPPER)
+
+
+def is_mounted():
+    return _PROBES.is_mounted(DATA_MOUNT)
+
+
+# The partition node is brw-rw---- root:disk, so an unprivileged caller cannot
+# distinguish "no header" from "not allowed to look" - and the two have
+# opposite remedies ("no header" invites init, which reformats). Never guess.
+def part_readable():
+    return _PROBES.is_readable(DATA_PART)
+
+
+def is_luks():
+    return part_present() and part_readable() and _PROBES.is_luks(DATA_PART)
+
+
+def disk_state():
+    """One word for the whole disk: the shared six-state classifier."""
+    return pn.disk_state(DATA_DEV, DATA_PART, DATA_MAPPER, DATA_MOUNT, _PROBES)
+
+
+def luks_uuid():
+    if is_luks():
+        return capture(["cryptsetup", "luksUUID", DATA_PART])
+    return ""
+
+
+# What to print on the luks line. Separated out so "cannot look" and "looked,
+# found nothing" stay distinguishable.
+def luks_report():
+    if not part_present():
+        return "no partition"
+    if not part_readable():
+        return f"not readable as {current_user()} - run: sudo data-disk status"
+    if is_luks():
+        return f"header present, UUID {luks_uuid()}"
+    return "no header"
+
+
+# configured | unset | unknown. The tdbsam is root-only, so unprivileged reads
+# "unknown".
+def smb_user_state():
+    if shutil.which("pdbedit") is None:
+        return "unknown"
+    if os.geteuid() != 0:
+        return "unknown"
+    listing = capture(["pdbedit", "-L"])
+    for line in listing.splitlines():
+        if line.startswith(f"{NAMED_USER}:"):
+            return "configured"
+    return "unset"
+
+
+def smb_user_report():
+    state = smb_user_state()
+    if state == "configured":
+        return f"{NAMED_USER} configured"
+    if state == "unset":
+        return f"{NAMED_USER} has no SMB password - sudo smbpasswd -a {NAMED_USER}"
+    return f"not readable as {current_user()} - run: sudo data-disk status"
+
+
+def smb_user_configured():
+    return smb_user_state() == "configured"
+
+
+# -- Shared actions --------------------------------------------------------------
+
+# Enforce writable group access on the mounted filesystem root. Mirrors the
+# assertion guest-firstboot.sh relies on.
+def ensure_data_mount_permissions():
+    run_or_exit(["chown", f"{DATA_OWNER}:{DATA_GROUP}", DATA_MOUNT])
+    run_or_exit(["chmod", DATA_MODE, DATA_MOUNT])
+    info(f"{DATA_MOUNT} perms {capture(['stat', '-c', '%U:%G %a', DATA_MOUNT])}")
+
+
+# The one place the share and state directories are created. sync-node
+# deliberately cannot: a command that can conjure an empty share can tell every
+# peer the share was emptied.
+def ensure_data_layout():
+    run_or_exit(["install", "-d", "-o", DATA_OWNER, "-g", DATA_GROUP,
+                 "-m", "2775", DATA_SHARE])
+    run_or_exit(["install", "-d", "-o", "root", "-g", DATA_GROUP,
+                 "-m", "0750", DATA_STATE_DIR])
+
+
+# Close down the bare mountpoint once the real filesystem is gone. Only safe
+# when nothing is mounted there, otherwise this would chmod the ext4 root.
+def secure_bare_mountpoint():
+    if is_mounted():
+        warn(f"{DATA_MOUNT} still mounted, leaving its permissions alone")
+        return
+    run_or_exit(["install", "-d", "-o", "root", "-g", "root",
+                 "-m", DATA_MOUNT_LOCKED_MODE, DATA_MOUNT])
+    try:
+        stray = len(os.listdir(DATA_MOUNT))
+    except OSError:
+        stray = 0
+    if stray > 0:
+        warn(f"{stray} entr(y|ies) written into the bare mountpoint {DATA_MOUNT}")
+        warn("these live on the OS disk and are hidden when the data disk mounts")
+
+
+def start_gated_services():
+    for service in DATA_DISK_SERVICES:
+        log(f"Start {service}")
+        if run(["systemctl", "start", service]).returncode != 0:
+            warn(f"{service} failed to start")
+            continue
+        # A unit whose condition was not met reports success and stays
+        # inactive. That is deliberate for a node that is not set up yet, and
+        # it is silent, so name it here rather than leave the operator to
+        # notice later.
+        if capture(["systemctl", "is-active", service]) != "active":
+            info(f"{service} was skipped, a start condition was not met")
+            info(f"  systemctl status {service}")
+
+
+def stop_gated_services():
+    # Reverse order, so a dependent stops before what it depends on.
+    for service in reversed(DATA_DISK_SERVICES):
+        log(f"Stop {service}")
+        if run(["systemctl", "stop", service]).returncode != 0:
+            warn(f"{service} failed to stop")
+
+
+# -- init ------------------------------------------------------------------------
+
+def cmd_init():
+    require_root("init")
+    if not dev_present():
+        die(f"{DATA_DEV} is not present. Nothing to initialise.")
+    if is_mounted():
+        die(f"{DATA_MOUNT} is mounted. Run 'data-disk lock' first.")
+    if is_open():
+        die(f"{DATA_LUKS_NAME} is open. Run 'data-disk lock' first.")
+
+    if part_present() and is_luks() and not FORCE:
+        die(f"{DATA_PART} already carries a LUKS header. Initialising would\n"
+            "       destroy it. Run 'data-disk unlock' to use the existing disk, or\n"
+            "       'data-disk init --force' to deliberately reformat it.")
+
+    if not part_present():
+        log(f"Partition {DATA_DEV} (GPT, single partition)")
+        run_or_exit(["sfdisk", DATA_DEV], input="label: gpt\n, , L\n",
+                    encoding="utf-8")
+        run(["udevadm", "settle"])
+        if not part_present():
+            die(f"{DATA_PART} did not appear after partitioning")
+    else:
+        info(f"{DATA_PART} already exists, reusing the partition")
+
+    log(f"luksFormat {DATA_PART}")
+    info("You are about to set a NEW passphrase. Nothing stores it for you.")
+    run_or_exit(["cryptsetup", "luksFormat", "--type", "luks2", DATA_PART])
+
+    log(f"Open {DATA_PART} as {DATA_LUKS_NAME}")
+    run_or_exit(["cryptsetup", "open", DATA_PART, DATA_LUKS_NAME])
+
+    log(f"Create the filesystem on {DATA_MAPPER}")
+    run_or_exit(["mkfs.ext4", "-F", "-L", DATA_LUKS_NAME, DATA_MAPPER])
+
+    # The one moment an empty share is a fact rather than a guess: the
+    # filesystem is new. The marker name lives in the Syncthing template, so
+    # ask sync-node rather than repeating it here.
+    log("Create the share layout and the folder marker")
+    run_or_exit(["mount", DATA_MAPPER, DATA_MOUNT])
+    ensure_data_layout()
+    # A failure here must not abort init between the mount and the umount
+    # below. A missing marker is safe - the folder stays refused until
+    # `sync-node marker --create`.
+    if shutil.which("sync-node"):
+        if run(["sync-node", "marker", "--create", "--force"]).returncode != 0:
+            warn("sync-node could not create the folder marker - run\n"
+                 "       'sudo sync-node marker --create' after 'data-disk unlock'")
+    else:
+        warn("sync-node absent, the folder marker was not created")
+    run_or_exit(["umount", DATA_MOUNT])
+
+    log(f"Initialised (LUKS UUID {luks_uuid()})")
+    info("The mapper is open but nothing is mounted yet.")
+    info("Next: sudo data-disk unlock")
+    if not smb_user_configured():
+        info(f"SMB access also needs a password: sudo smbpasswd -a {NAMED_USER}")
+
+
+# -- unlock ------------------------------------------------------------------------
+
+def _fstab_has_mount_entry():
+    try:
+        with open("/etc/fstab", encoding="utf-8") as handle:
+            for line in handle:
+                if re.match(rf"^[^#].*[ \t]{re.escape(DATA_MOUNT)}[ \t]", line):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def cmd_unlock():
+    require_root("unlock")
+    if not dev_present():
+        die(f"{DATA_DEV} is not present. Is the data disk attached?")
+    if not part_present() or not is_luks():
+        die(f"{DATA_PART} carries no LUKS header. Run 'data-disk init' first.")
+
+    if is_open():
+        info(f"{DATA_LUKS_NAME} already open")
+    else:
+        log(f"Open {DATA_PART} as {DATA_LUKS_NAME}")
+        run_or_exit(["cryptsetup", "open", DATA_PART, DATA_LUKS_NAME])
+
+    if is_mounted():
+        info(f"{DATA_MOUNT} already mounted")
+    else:
+        log(f"Mount {DATA_MOUNT}")
+        run_or_exit(["install", "-d", DATA_MOUNT])
+        if _fstab_has_mount_entry():
+            run_or_exit(["mount", DATA_MOUNT])
+        else:
+            warn(f"no fstab entry for {DATA_MOUNT}, mounting explicitly")
+            run_or_exit(["mount", DATA_MAPPER, DATA_MOUNT])
+
+    ensure_data_mount_permissions()
+    ensure_data_layout()
+    start_gated_services()
+
+    log("Unlocked")
+    cmd_status()
+
+
+# -- lock --------------------------------------------------------------------------
+
+def cmd_lock():
+    require_root("lock")
+
+    stop_gated_services()
+
+    if is_mounted():
+        log(f"Unmount {DATA_MOUNT}")
+        if run(["umount", DATA_MOUNT], stderr=subprocess.DEVNULL).returncode != 0:
+            if not FORCE:
+                warn(f"{DATA_MOUNT} is busy. Holders:")
+                if shutil.which("fuser"):
+                    holders = run(["fuser", "-vm", DATA_MOUNT],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  encoding="utf-8", errors="replace").stdout or ""
+                    for line in holders.splitlines():
+                        print(f"    {line}")
+                else:
+                    warn(f"fuser not available (install psmisc) - try: lsof +D {DATA_MOUNT}")
+                die("Nothing was unmounted. Close the holders, or run\n"
+                    "       'data-disk lock --force' to kill them and unmount anyway.")
+            warn(f"--force: killing processes holding {DATA_MOUNT}")
+            if shutil.which("fuser"):
+                run(["fuser", "-km", DATA_MOUNT])
+            if run(["umount", DATA_MOUNT], stderr=subprocess.DEVNULL).returncode != 0:
+                run_or_exit(["umount", "-l", DATA_MOUNT])
+    else:
+        info(f"{DATA_MOUNT} not mounted")
+
+    if is_open():
+        log(f"Close {DATA_LUKS_NAME}")
+        run_or_exit(["cryptsetup", "close", DATA_LUKS_NAME])
+    else:
+        info(f"{DATA_LUKS_NAME} not open")
+
+    secure_bare_mountpoint()
+
+    log("Locked")
+    cmd_status()
+
+
+# -- status -------------------------------------------------------------------------
+
+def _row(label, value):
+    print(f"  {label:<12} {value}")
+
+
+def cmd_status():
+    state = disk_state()
+
+    if BRIEF:
+        print({
+            "unlocked": f"data disk: unlocked at {DATA_MOUNT}",
+            "opened": "data disk: open but not mounted - sudo data-disk unlock",
+            "locked": "data disk: locked - sudo data-disk unlock",
+            "uninitialised": "data disk: not initialised - sudo data-disk init",
+            "absent": f"data disk: {DATA_DEV} not attached",
+            "unknown": "data disk: state needs root - sudo data-disk status",
+        }[state])
+        return
+
+    _row("namespace", NAMESPACE)
+    _row("state", state)
+    _row("device", f"{DATA_DEV} " + ("(present)" if dev_present() else "(absent)"))
+    _row("partition", f"{DATA_PART} " + ("(present)" if part_present() else "(absent)"))
+    _row("luks", luks_report())
+    _row("mapper", f"{DATA_MAPPER} " + ("(open)" if is_open() else "(closed)"))
+
+    if is_mounted():
+        _row("mount", f"{DATA_MOUNT} (mounted)")
+        _row("perms", capture(["stat", "-c", "%U:%G %a", DATA_MOUNT]))
+        usage_line = capture(["df", "-h", "--output=used,size,pcent", DATA_MOUNT])
+        if usage_line:
+            last = usage_line.splitlines()[-1]
+            _row("usage", " ".join(last.split()))
+    else:
+        _row("mount", f"{DATA_MOUNT} (not mounted)")
+
+    _row("smb user", smb_user_report())
+    if shutil.which("systemctl"):
+        _row("smbd", capture(["systemctl", "is-active", "smbd"]))
+
+    for service in DATA_DISK_SERVICES:
+        _row(service, capture(["systemctl", "is-active", service]))
+
+
+# -- Dispatch --------------------------------------------------------------------
+
+def main(argv):
+    global FORCE, BRIEF
+
+    command = argv[0] if argv else ""
+    for option in argv[1:]:
+        if option == "--force":
+            FORCE = True
+        elif option == "--brief":
+            BRIEF = True
+        elif option in ("-h", "--help"):
+            usage()
+            return 0
+        else:
+            die(f"Unknown option: {option}")
+
+    commands = {
+        "init": cmd_init,
+        "unlock": cmd_unlock,
+        "lock": cmd_lock,
+        "status": cmd_status,
+    }
+    if command in ("", "-h", "--help", "help"):
+        usage()
+        return 0
+    if command not in commands:
+        usage(sys.stderr)
+        die(f"Unknown command: {command}")
+    commands[command]()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

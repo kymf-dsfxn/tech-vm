@@ -1,12 +1,9 @@
-# packages.list
-#
-# Every apt package the guest installs, one per line. Comments start with '#'.
-# build-package-repo.sh resolves the dependency closure of this list on a host
-# that matches the target (Ubuntu 26.04 amd64) and stages it as an on-ISO apt
-# repository. guest-install.sh installs exactly these names from that repo, with
-# no network. Keep the list as the single source of truth for guest packages.
+# packages.list - single source of truth for guest apt packages, one per line.
+# build-package-repo.sh resolves the dependency closure into the on-ISO repo.
+# Packages shipped as payload .debs must NOT be listed (a listed name would
+# resolve a second, different copy from the archive); their dependencies must be.
 
-# Base utilities and the VMware guest agent (formerly the late-commands list)
+# Base utilities & VMware guest agent
 open-vm-tools
 less
 tree
@@ -19,7 +16,7 @@ pigz
 figlet
 locales
 
-# Developer toolchain (formerly installed by setup-vm.sh)
+# Developer toolchain
 git
 openjdk-25-jdk-headless
 python3
@@ -29,29 +26,23 @@ apt-rdepends
 podman
 uidmap
 passt
+xorriso
 
-# Local-build toolchain. Lets the VM run full local builds of the code the sdlc
-# build images cover (Python utilities under tsdev-utilities, bash build-scripts
-# under tsdev-sdlc-tools), matching what those images install.
-#   python3-pip  - the Python SBOM step builds a throwaway venv and runs
-#                  `pip install`/`pip freeze` (common-generate-python-sbom.sh).
-#   shellcheck   - bash static analysis for script-type (build-scripts) builds.
-# Non-apt build tools (syft, shfmt, uv) are pinned binaries staged on the ISO by
-# fetch-build-tools.sh + guest-install.sh, not installed from this list.
+# Local-build toolchain: matches what the sdlc build images install, so the VM
+# can run full local builds of the code they cover. Non-apt tools (syft, shfmt,
+# uv) are pinned binaries staged by fetch-build-tools.sh, not listed here.
 python3-pip
 shellcheck
 
 # Data disk encryption + SMB file sharing
-#   cryptsetup-bin - the cryptsetup CLI only. Deliberately NOT the full
-#                    `cryptsetup` package: that adds initramfs hooks and
-#                    boot-time unlock machinery, and this data disk is never
-#                    unlocked at boot (see /usr/local/bin/data-disk).
-#   samba          - serves the platform data root to the Windows host. smbd
-#                    stays up whether or not the disk is unlocked; the share
-#                    stanza gates itself on the mount.
-#   psmisc         - fuser, used by `data-disk lock` to report or kill the
-#                    processes holding the mount. Not guaranteed present under
-#                    the minimised install (see payload/extra_cfg/apt-minimal.conf).
+#   cryptsetup-bin - the cryptsetup CLI only.
+#   samba          - serves the platform data root to the Windows host.
+#   psmisc         - fuser, used by `data-disk lock`.
 cryptsetup-bin
 samba
 psmisc
+
+# Syncthing replication of shared data
+#   procps       - the only dependency of syncthing_*_amd64.deb beyond libc6.
+#                  Syncthing itself comes from .deb under payload/extra_deb/.
+procps

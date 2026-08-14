@@ -2,22 +2,13 @@
 #
 # fetch-build-tools.sh
 #
-# Fetch the pinned standalone build tools the guest cannot get from apt: syft
-# (SBOM), shfmt (shell formatter) and uv (Python package/venv manager). It
-# downloads each with checksum verification and stages them under
-# .cache/build-tools/bin. build-custom-iso.sh copies that tree onto the ISO
-# under /autoinstall/vm-init/build-tools, and guest-install.sh installs the
-# binaries into /usr/local/bin with no network.
+# Fetch the standalone build tools the guest cannot get from apt: syft, shfmt
+# and uv. Each download is checksum-verified and staged under
+# .cache/build-tools/bin (git-ignored, not committed).
 #
-# This mirrors build-package-repo.sh: a build-time fetch, cached under .cache
-# (git-ignored), not committed. Rerun only when a pin below changes.
-#
-# syft and shfmt are pinned to an exact version AND sha256, matching the values
-# baked into the sdlc build images (build-image.base/build.sh and
-# build-image.script). uv is pinned to a version and verified against the
-# per-asset .sha256 sidecar that astral publishes with each release; leave
-# UV_VERSION=latest to resolve the newest tag from the releases/latest redirect
-# (no GitHub API call), or pass --uv-version to pin it.
+# syft and shfmt refetch only when their pins below change. uv defaults to
+# "latest", resolved at run time, so a rerun can change the staged uv unless
+# --uv-version pins it.
 #
 # Requirements: curl, tar, sha256sum.
 #

@@ -1,3 +1,5 @@
+# Shells out to `ipconfig` and string-matches the English adapter/IPv4 labels,
+# so this is Windows-only and locale-dependent.
 import re
 import subprocess
 

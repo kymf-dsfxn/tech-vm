@@ -2,17 +2,10 @@
 #
 # build-package-repo.sh
 #
-# Build the offline apt repository that the guest installs from. It resolves the
-# dependency closure of 00.host-config/common/packages.list and stages the .deb
-# files with an apt Packages index. build-custom-iso.sh copies the result onto
-# the ISO under /autoinstall/vm-init/apt-repo, and guest-install.sh installs from
-# it with no network.
-#
-# The closure is fetched at build time, not committed to git. The fetch runs
-# inside a container that matches the target release, so the resolved versions
-# match what the guest would get. A later phase may replace this with a managed
-# repository artefact (for example aptly) that has its own life cycle. This
-# script is the build-time-fetch approach for now.
+# Build the offline apt repository the guest installs from: the dependency
+# closure of packages.list, staged as .deb files with an apt Packages index.
+# Resolution runs in a container matching the target release so the closure
+# is computed against the right archive.
 #
 # Requirements: docker or podman.
 #

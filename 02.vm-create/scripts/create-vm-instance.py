@@ -1,35 +1,10 @@
 #!/usr/bin/env python3
 
-# Create a VMware Workstation VM instance: write the .vmx and the virtual disks.
-# Python port of create-vm-instance.ps1.
+# Create a VMware Workstation VM from a JSON definition file plus CLI overrides.
 #
-# Pipeline position:
-#   1. 01.iso-build             -- build the per-host Ubuntu ISO
-#   2. create-vm-instance.py    -- write the .vmx and disks for the VM  <-- this
-#   3. invoke-vmrun.py          -- start / control the VM
+# Settings precedence: command-line value > --config JSON key > built-in default.
 #
-# Settings resolve in this order (highest wins): a command-line value, then the
-# matching key in the --config JSON file, then the built-in default. Config keys
-# are PascalCase (VmName, CpuCount, ...), matching the existing
-# vm-definition.<name>.json files.
-#
-# The ISO is chosen at run time, not pinned in the definition file. Give an
-# explicit ISO with --iso-path, or a directory of built ISOs with --iso-dir and
-# let the script resolve the newest one (from stage 01's latest.txt, or the
-# newest .iso when no pointer is present). See resolve_iso_path for the order.
-#
-# Usage:
-#   uv run python create-vm-instance.py run \
-#       --vm-name xd00-lde-0010 --vm-root-path S:\vms \
-#       --iso-dir S:\isos\xd00-lde-0010 [--force] [--dry-run] [--skip-disk-creation]
-#
-#   uv run python create-vm-instance.py run \
-#       --vm-name xd00-lde-0010 --vm-root-path S:\vms --iso-path .\out\ubuntu.iso
-#
-#   uv run python create-vm-instance.py run --config .\vm-definition.xd00-lde-0010.json \
-#       --iso-dir S:\isos --iso-host xd00-lde-0010
-#
-#   uv run python create-vm-instance.py validate --config .\vm-definition.xd00-lde-0010.json [--strict]
+# See README.md for concepts and --help for the full flag surface.
 
 import argparse
 import atexit
@@ -48,8 +23,7 @@ import vmware_workstation as vmw  # noqa: E402
 __script_name__ = "create-vm-instance"
 __version__ = "1.1.0"
 
-# Sensitive argument names to redact in log output (none expected here; kept
-# for house-style consistency across scripts).
+# No matching dests exist today; kept for cross-script consistency.
 _REDACT_KEYS = {"password", "secret", "token"}
 
 
@@ -81,6 +55,7 @@ _SETTINGS = [
     ("EnableSecureBoot", "enable_secure_boot", "bool", False, False),
     ("DisableSideChannelMitigations", "disable_side_channel_mitigations", "bool", False, False),
     ("DataDiskSourcePath", "data_disk_source_path", "str", None, False),
+    ("HostSharedDrives", "host_shared_drives", "str", "C:ro,X:rw,S:ro", False),
 ]
 
 _RANGES = {
@@ -110,23 +85,13 @@ _ALLOWED = {
 # -- Script context ------------------------------------------------------
 
 def _script_context():
-    """The single-line script identity: '<name> v<version>'.
-
-    Single source of truth used for argument-parse errors/help, the pre-banner
-    startup guard, and the run banner, so a failure is always seen against the
-    same context regardless of where it happens.
-    """
+    """Script identity line: single source of context for errors, help, and the banner."""
     return f"{__script_name__} v{__version__}"
 
 
 class HeaderArgumentParser(argparse.ArgumentParser):
-    """ArgumentParser that prefixes usage, help, and errors with the script
-    context line, and shows the full help (not just the terse usage line) on
-    every parse failure.
-
-    Propagates to subparsers automatically: add_subparsers() defaults its
-    parser_class to type(self), so subcommand parsers inherit this behaviour.
-    """
+    """Parser that prefixes the script identity header to help and errors, so
+    parse failures carry script identity; subparsers inherit via parser_class."""
 
     def _header(self):
         return _script_context() + "\n"
@@ -200,11 +165,9 @@ def redact_arguments(args):
 # -- CLI -----------------------------------------------------------------
 
 def _add_domain_arguments(parser):
-    """Add the VM-definition arguments shared by run and validate.
-
-    Defaults are None so we can tell a supplied value from an absent one; the
-    real defaults live in _SETTINGS and are applied during resolution.
-    """
+    """Add the VM-definition arguments shared by run and validate. Defaults are
+    None so a supplied value is distinguishable from an absent one; real
+    defaults live in _SETTINGS."""
     def valid_values(name):
         return " (one of: " + ", ".join(_ALLOWED[name]) + ")" if name in _ALLOWED else ""
 
@@ -216,8 +179,6 @@ def _add_domain_arguments(parser):
     parser.add_argument("--vm-name", help="VM name; also the directory and .vmx base name")
     parser.add_argument("--vm-root-path", help="Directory under which <vm-name>/ is created")
 
-    # ISO source. --iso-path names one file; --iso-dir names a directory and the
-    # newest ISO in it is resolved. The two are mutually exclusive.
     iso_group = parser.add_mutually_exclusive_group()
     iso_group.add_argument("--iso-path", help="Explicit ISO to attach as a boot CD-ROM")
     iso_group.add_argument("--iso-dir", help="Directory of built ISOs; resolve and attach the newest")
@@ -244,8 +205,6 @@ def _add_domain_arguments(parser):
     parser.add_argument("--disk-provisioning", help="Disk provisioning" + valid_values("DiskProvisioning"))
     parser.add_argument("--vdisk-manager-path", help="Explicit path to vmware-vdiskmanager.exe")
 
-    # Booleans use store_true with default None so absent != False, preserving
-    # the config/default precedence. Each bool has an explicit on/off pair.
     for flag_base, dest, help_on in [
         ("secure-boot", "enable_secure_boot", "Enable UEFI secure boot"),
         ("side-channel-mitigations", "disable_side_channel_mitigations", "Disable side-channel mitigations"),
@@ -266,6 +225,12 @@ def _add_domain_arguments(parser):
                         help="Attach an existing data disk .vmdk instead of creating a fresh one; "
                              "the descriptor and any -s*.vmdk extents are copied into the new VM "
                              "directory (requires --data-disk-count 1)")
+
+    parser.add_argument("--host-shared-drives",
+                        help="Host drives shared into the guest via HGFS, as a comma list of "
+                             "<letter>[=<host-path>][:ro|:rw] (default path <letter>:\\, "
+                             "default ro); mounted at /mnt/<letter> in the guest. "
+                             "Empty string disables HGFS entirely")
 
     parser.add_argument("--log-dir", help="Directory for the run log (default <vm-root-path>/logs)")
     parser.add_argument("--quiet", action="store_true", default=False,
@@ -320,13 +285,15 @@ def load_config(config_path):
 
 
 def resolve_settings(args, config):
-    """Apply the command-line > config > default precedence (Get-SettingValue)."""
+    """Apply the command-line > config > default precedence."""
     resolved = {}
     for name, dest, kind, default, required in _SETTINGS:
         cli_value = getattr(args, dest, None)
         if cli_value is not None:
             value = cli_value
-        elif config is not None and name in config:
+        # config.get, not `name in config`: an explicit JSON null counts as
+        # absent, so it cannot bypass the required check or beat the default.
+        elif config is not None and config.get(name) is not None:
             value = config[name]
         elif required:
             raise SettingError(
@@ -347,12 +314,8 @@ def resolve_settings(args, config):
 # -- ISO resolution ------------------------------------------------------
 
 def _newest_iso_in(directory):
-    """Return the most recently modified '*.iso' in a directory, or None.
-
-    Used as the fallback when a directory holds no latest.txt. Modification time
-    beats name order, because the version field sits before the timestamp in the
-    ISO name and would otherwise sort a newer minor version behind an older one.
-    """
+    """Return the most recently modified '*.iso' in a directory, or None. Mtime
+    beats name order: the version field sorts a newer minor behind an older one."""
     candidates = glob.glob(os.path.join(directory, "*.iso"))
     if not candidates:
         return None
@@ -360,14 +323,7 @@ def _newest_iso_in(directory):
 
 
 def _resolve_iso_from_dir(iso_dir, host, vm_name):
-    """Resolve one ISO path from a directory of built ISOs.
-
-    The directory can be the host's own ISO folder or a parent that holds a
-    per-host subfolder. The lookup descends into a subfolder named for the host,
-    or failing that the VM, when one exists. It then takes the ISO named in
-    latest.txt (the pointer stage 01 writes), or the newest .iso when no pointer
-    is present.
-    """
+    """Resolve one ISO path from a directory of built ISOs."""
     base = vmw.resolve_full_path(iso_dir)
     if not os.path.isdir(base):
         raise SettingError(f"ISO directory does not exist: {base}")
@@ -395,13 +351,7 @@ def _resolve_iso_from_dir(iso_dir, host, vm_name):
 
 
 def resolve_iso_path(args, config, vm_name):
-    """Resolve the ISO to attach, or None.
-
-    Order, highest first: the command-line --iso-path, then --iso-dir, then the
-    config IsoPath, then the config IsoDir. A command-line value beats the config
-    file, and an explicit path beats a directory lookup. The host for a directory
-    lookup is --iso-host, then the config IsoHost, then none.
-    """
+    """Resolve the ISO to attach, or None."""
     cfg = config or {}
     host = args.iso_host or cfg.get("IsoHost")
 
@@ -417,9 +367,9 @@ def resolve_iso_path(args, config, vm_name):
 
 
 def validate_settings(s, strict=False):
-    """Range and choice checks (Assert-InRange / Assert-OneOf) plus cross-field
-    rules. Returns a list of non-fatal warnings; raises SettingError on any
-    fatal problem (or on a warning when strict)."""
+    """Range, choice, and cross-field checks. Returns a list of non-fatal
+    warnings; raises SettingError on any fatal problem (or on a warning when
+    strict)."""
     for name, (lo, hi) in _RANGES.items():
         value = s[name]
         if value < lo or value > hi:
@@ -434,6 +384,11 @@ def validate_settings(s, strict=False):
 
     if s["NetworkType"] == "custom" and not s["NetworkName"]:
         raise SettingError("NetworkName is required when NetworkType is custom.")
+
+    try:
+        vmw.parse_host_shared_drives(s["HostSharedDrives"] or "")
+    except ValueError as exc:
+        raise SettingError(str(exc))
 
     # Attaching an existing data disk is a single-disk operation: the source
     # descriptor maps onto exactly one data-disk slot.
@@ -466,11 +421,9 @@ def validate_settings(s, strict=False):
 def _bootstrap_setup(args, script_start_timestamp):
     """Resolve settings and set up logging.
 
-    Everything here runs BEFORE the banner (the first normal output). Settings
-    must resolve first because the default log directory is derived from the
-    resolved VM root path, so config/settings errors and log-setup errors both
-    fall inside this pre-banner window. main() wraps the single call so any
-    failure -- of any type -- is still prefixed with the script context.
+    Settings resolve before logging exists (the default log dir derives from
+    the resolved VM root), so failures here land in the pre-banner window that
+    main() catches and maps to exit 2.
 
     Returns (settings, resolved_vm_root, log_path, config).
     """
@@ -493,14 +446,8 @@ def _bootstrap_setup(args, script_start_timestamp):
 def main():
     args = parse_arguments()
 
-    # Capture startup timestamp
     script_start_timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    # Guard the pre-banner window. Until _bootstrap_setup() prints the context
-    # banner, a failure (bad --config, a missing required setting, an
-    # unwritable log dir) has no script identity on screen, so emit the context
-    # line and the error here. Catches EVERY exception type, so no pre-banner
-    # path can fail without context. SettingError / bad input map to exit 2.
     try:
         settings, resolved_vm_root, log_path, config = _bootstrap_setup(args, script_start_timestamp)
     except Exception as exc:
@@ -508,10 +455,8 @@ def main():
         sys.stderr.write(f"{__script_name__}: error: {exc}\n")
         return 2
 
-    # Redact sensitive values before logging.
     redacted_args = redact_arguments(args)
 
-    # -- Standard run banner (printed before subcommand dispatch) --
     print(f"# {_script_context()}")
     print(f"# Started:  {script_start_timestamp}")
     print(f"# Log:      {log_path}")
@@ -561,9 +506,6 @@ def _cmd_validate(args, settings, config):
 def _cmd_run(args, settings, resolved_vm_root, config):
     overall_start = time.time()
 
-    # =================================================================
-    # PHASE 1: Pre-flight validation (fail fast before expensive work)
-    # =================================================================
     print("\n" + "=" * 60)
     print("PHASE 1: PRE-FLIGHT CHECKS")
     print("=" * 60)
@@ -593,9 +535,6 @@ def _cmd_run(args, settings, resolved_vm_root, config):
     print(f"  vdiskmanager: {resolved_vdiskmanager or '(skipped)'}")
     print("  Pre-flight checks passed.")
 
-    # =================================================================
-    # PHASE 2: Execute
-    # =================================================================
     print("\n" + "=" * 60)
     print("PHASE 2: EXECUTE")
     print("=" * 60)
@@ -619,9 +558,6 @@ def _cmd_run(args, settings, resolved_vm_root, config):
     disks.append({"FileName": core_disk_name, "Path": core_disk_path,
                   "SizeGB": settings["CoreDiskSizeGB"]})
 
-    # DataDiskSourcePath attaches an existing disk instead of creating a fresh
-    # one. Validated in validate_settings(): set implies DataDiskCount == 1 and
-    # an existing .vmdk, so the single data-disk entry below is the target.
     data_disk_source = (settings["DataDiskSourcePath"] or "").strip()
     data_disk_source = vmw.resolve_full_path(data_disk_source) if data_disk_source else None
 
@@ -671,6 +607,7 @@ def _cmd_run(args, settings, resolved_vm_root, config):
         "ScsiController": settings["ScsiController"],
         "Disks": disks,
         "IsoPath": resolved_iso,
+        "HostSharedFolders": vmw.parse_host_shared_drives(settings["HostSharedDrives"] or ""),
     }
 
     vmx_content = vmw.build_vmx_content(definition)
@@ -680,9 +617,6 @@ def _cmd_run(args, settings, resolved_vm_root, config):
         vmw.write_vmx_file(vmx_path, vmx_content)
         print(f"  Wrote VMX file: {vmx_path}")
 
-    # =================================================================
-    # SUMMARY
-    # =================================================================
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)

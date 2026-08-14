@@ -2,36 +2,17 @@
 #
 # build-custom-iso.sh
 #
-# Create a per-host custom Ubuntu ISO with embedded autoinstall configuration
-# and a full offline guest payload. The resulting ISO boots into an unattended
-# install that needs no network: it installs every package from an on-ISO apt
-# repository, places the guest payload, and provisions the guest through
-# guest-install.sh (install time) and guest-firstboot.sh (first boot).
+# Bake a per-host offline autoinstall ISO from 00.host-config: unattended
+# install with no network, provisioned by guest-install.sh (install time)
+# and guest-firstboot.sh (first boot).
 #
-# Layout (post-restructure):
-#   tech-vm/
-#     00.host-config/                 <- inputs (config + payload + scripts)
-#       build_version
-#       common/{grub.cfg.template,loopback.cfg,image-build-info,
-#               guest-install.sh,guest-firstboot.sh,data-disk,
-#               make-manifest.py,vm-init-firstboot.service,packages.list,
-#               payload/...}
-#       <host>/autoinstall/{user-data,meta-data}
-#       <host>/payload/...            <- optional per-host payload overrides
-#     01.iso-build/
-#       scripts/build-custom-iso.sh   <- this script
-#       scripts/build-package-repo.sh
-#       .cache/apt-repo/              <- offline repo (built separately)
-#       output/<host>/                <- built ISOs + latest.txt
+# Usage: build-custom-iso.sh <hostname> <base-iso-path> [output-dir]
 #
-# Usage:
-#   ./build-custom-iso.sh <hostname> <base-iso-path> [output-dir]
+# Both caches must exist before this runs:
+#   offline apt repo    build-package-repo.sh (override: APT_REPO_DIR)
+#   build-tools cache   fetch-build-tools.sh  (override: BUILD_TOOLS_DIR)
 #
-# The offline apt repo must exist before this runs. Build it once with:
-#   ./build-package-repo.sh
-# or point APT_REPO_DIR at an existing repo.
-#
-# Requirements: xorriso, python3, and the apt repo from build-package-repo.sh.
+# Requirements: xorriso, python3.
 
 set -euo pipefail
 
@@ -61,7 +42,7 @@ fi
 TARGET_HOSTNAME="${1}"
 BASE_ISO_PATH="${2}"
 
-# --- Resolve paths (new numbered layout) ---
+# --- Resolve paths ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$(dirname "${SCRIPT_DIR}")"          # 01.iso-build
 TECH_VM_DIR="$(dirname "${BUILD_DIR}")"         # tech-vm
@@ -76,18 +57,22 @@ AUTOINSTALL_DIR="${HOST_CONFIG_DIR}/${TARGET_HOSTNAME}/autoinstall"
 HOST_PAYLOAD_DIR="${HOST_CONFIG_DIR}/${TARGET_HOSTNAME}/payload"
 COMMON_PAYLOAD_DIR="${COMMON_DIR}/payload"
 
-GRUB_TEMPLATE="${COMMON_DIR}/grub.cfg.template"
-LOOPBACK_CFG="${COMMON_DIR}/loopback.cfg"
+GRUB_TEMPLATE="${COMMON_DIR}/control/grub.cfg.template"
+LOOPBACK_CFG="${COMMON_DIR}/control/loopback.cfg"
 VERSION_FILE="${HOST_CONFIG_DIR}/build_version"
 
-# Common guest-side assets staged under /autoinstall/vm-init on the ISO
+# Common guest-side assets, staged FLAT under /autoinstall/vm-init on the ISO:
+# the repo groups by role (control/provision/guest-bin), /opt/vm-init keeps
+# its layout whatever the repo tree does.
 COMMON_ASSETS=(
-  "image-build-info"
-  "guest-install.sh"
-  "guest-firstboot.sh"
-  "data-disk"
-  "make-manifest.py"
-  "vm-init-firstboot.service"
+  "guest-bin/image-build-info"
+  "provision/guest-install.sh"
+  "provision/guest-firstboot.sh"
+  "guest-bin/data-disk"
+  "guest-bin/sync-node"
+  "guest-bin/platform_node.py"
+  "provision/make-manifest.py"
+  "provision/vm-init-firstboot.service"
   "packages.list"
 )
 
@@ -134,7 +119,10 @@ trap cleanup EXIT
 
 # --- Step 1: Extract base ISO ---
 _cprint 6 "Extracting base ISO"
-xorriso -osirrox on -indev "${BASE_ISO_PATH}" -extract / "${EXTRACT_DIR}" 2>/dev/null
+mkdir -p "${EXTRACT_DIR}"
+_cprint 2 "Extraction workspace: ${EXTRACT_DIR}"
+xorriso -report_about UPDATE -osirrox on -indev "${BASE_ISO_PATH}" \
+  -extract / "${EXTRACT_DIR}"
 chmod -R u+w "${EXTRACT_DIR}"
 
 # --- Step 2: Replace GRUB configuration ---
@@ -159,17 +147,19 @@ _cprint 6 "Staging vm-init payload"
 VM_INIT_STAGE="${EXTRACT_DIR}/autoinstall/vm-init"
 mkdir -p "${VM_INIT_STAGE}"
 
-# Common guest scripts and assets
+# Common guest scripts and assets, flattened to basenames
 for asset in "${COMMON_ASSETS[@]}"; do
-  cp "${COMMON_DIR}/${asset}" "${VM_INIT_STAGE}/${asset}"
+  cp "${COMMON_DIR}/${asset}" "${VM_INIT_STAGE}/$(basename "${asset}")"
 done
 chmod 0755 "${VM_INIT_STAGE}/guest-install.sh" \
            "${VM_INIT_STAGE}/guest-firstboot.sh" \
            "${VM_INIT_STAGE}/data-disk" \
+           "${VM_INIT_STAGE}/sync-node" \
+           "${VM_INIT_STAGE}/platform_node.py" \
            "${VM_INIT_STAGE}/make-manifest.py" \
            "${VM_INIT_STAGE}/image-build-info"
 
-# Payload: common first, then per-host overrides win (the create-bundle.py merge)
+# The payload merge (common, then per-host overrides)
 [[ -d "${COMMON_PAYLOAD_DIR}" ]] && cp -a "${COMMON_PAYLOAD_DIR}/." "${VM_INIT_STAGE}/"
 [[ -d "${HOST_PAYLOAD_DIR}" ]]   && cp -a "${HOST_PAYLOAD_DIR}/."   "${VM_INIT_STAGE}/"
 
@@ -186,7 +176,7 @@ printf '%s\n' \
   > "${VM_INIT_STAGE}/build-info.env"
 
 # Planned manifest
-python3 "${COMMON_DIR}/make-manifest.py" plan \
+python3 "${COMMON_DIR}/provision/make-manifest.py" plan \
   --image-info "${IMAGE_INFO}" \
   --version "${IMAGE_VERSION}" \
   --build-timestamp "${BUILD_TIMESTAMP}" \
@@ -197,7 +187,7 @@ python3 "${COMMON_DIR}/make-manifest.py" plan \
 
 _cprint 2 "Payload staged: $(du -sh "${VM_INIT_STAGE}" | cut -f1)"
 
-# --- Step 5: Update md5sum.txt for the replaced GRUB (as before) ---
+# --- Step 5: Update md5sum.txt for the replaced GRUB ---
 if [[ -f "${EXTRACT_DIR}/md5sum.txt" ]]; then
   grub_md5=$(cd "${EXTRACT_DIR}" && md5sum "./boot/grub/grub.cfg" | cut -d' ' -f1)
   sed -i -e "s|^.*[[:space:]] ./boot/grub/grub.cfg|${grub_md5}  ./boot/grub/grub.cfg|" "${EXTRACT_DIR}/md5sum.txt"

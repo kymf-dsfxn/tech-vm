@@ -1,0 +1,222 @@
+<configuration version="52">
+    <!-- =====================================================================
+         Guest node template for the platform share. Design:
+         capability.data-synchronisation.md.
+
+         Two placeholder namespaces; sync-node render refuses to write while
+         any of either kind survives.
+
+         AUTOFILL_* are filled by render, on the node. Nothing to do:
+           AUTOFILL_DEVICE_ID_SELF       from the identity on the encrypted disk
+           AUTOFILL_DEVICE_NAME          this guest's host name
+           AUTOFILL_API_KEY              128 fresh random bits, per node
+
+         MANUALLY_FIX_* are filled by a person, once, in the REPOSITORY copy at
+         00.host-config/common/payload/extra_cfg/syncthing/ (a guest-only edit
+         is lost at the next image):
+           MANUALLY_FIX_FOLDER_ID        the hub's folder ID, exactly
+           MANUALLY_FIX_HUB_DEVICE_ID    the hub's device ID (a public key)
+           MANUALLY_FIX_HUB_LAN_ADDRESS  the NAS on the house LAN
+           MANUALLY_FIX_HUB_ADDRESS      the DDNS name for the house
+
+         The hub port is a fixed 22000 on both paths: the router forwards
+         22000 to 22000 by intention. See the public-path comment below.
+
+         version="52" is what Syncthing 2.1.3 writes; author at the version the
+         binary writes or the on-ISO file and the in-service file disagree from
+         the first start. Syncthing owns this file once it has run: a starting
+         point, not something to re-apply. An XML comment may not contain two
+         consecutive hyphens, which is why option names avoid them here.
+         ===================================================================== -->
+
+    <!-- The folder id must equal the hub's, character for character: folders
+         match across devices by ID alone. Read it on the hub (Edit Folder, or
+         `syncthing cli config folders list`); expect a random pair like
+         "abcde-12345". A mismatch does not error - it arrives as a New Folder
+         offer with a nested-path warning. The label is local and may say
+         anything. -->
+    <folder id="MANUALLY_FIX_FOLDER_ID" label="dsfxn platform share" path="/srv/dsfxn/share"
+            type="sendreceive" rescanIntervalS="3600" fsWatcherEnabled="true"
+            fsWatcherDelayS="10" ignorePerms="false" autoNormalize="true">
+        <filesystemType>basic</filesystemType>
+        <device id="AUTOFILL_DEVICE_ID_SELF" introducedBy=""></device>
+        <device id="MANUALLY_FIX_HUB_DEVICE_ID" introducedBy=""></device>
+
+        <!-- markerName is a CHILD element, not an attribute: as an attribute
+             it is accepted, silently ignored, and the guard reverts to
+             .stfolder. Read the effective value back with `sync-node marker`.
+             The non-default name is deliberate - Syncthing auto-creates only
+             .stfolder, so this one is never recreated behind your back and the
+             folder is refused whenever the marker is absent (the folder marker
+             invariant). -->
+        <markerName>.dsfxn-share-marker</markerName>
+
+        <minDiskFree unit="%">5</minDiskFree>
+
+        <!-- Versioning is the recovery net for the empty-folder mistake. Keep it. -->
+        <versioning type="staggered">
+            <param key="maxAge" val="2592000"></param>
+            <cleanupIntervalS>3600</cleanupIntervalS>
+            <fsPath></fsPath>
+            <fsType>basic</fsType>
+        </versioning>
+
+        <maxConflicts>10</maxConflicts>
+        <order>random</order>
+        <maxConcurrentWrites>16</maxConcurrentWrites>
+        <blockIndexing>true</blockIndexing>
+
+        <!-- Ownership never replicates (would need syncOwnership plus extra
+             capabilities, deliberately off). Each device owns its own copy. -->
+        <syncOwnership>false</syncOwnership>
+        <sendOwnership>false</sendOwnership>
+        <syncXattrs>false</syncXattrs>
+        <sendXattrs>false</sendXattrs>
+
+        <!-- ignorePerms false (above): permission bits replicate, which works
+             only because every Linux node writes with umask 0002 (UMask=0002
+             in the unit drop-in). Windows nodes keep Ignore Permissions set,
+             and a file edited there loses its executable bit everywhere,
+             permanently - keep executables in git. Full model:
+             capability.data-synchronisation.md, "Permission replication". -->
+    </folder>
+
+    <device id="AUTOFILL_DEVICE_ID_SELF" name="AUTOFILL_DEVICE_NAME"
+            compression="metadata" introducer="false" skipIntroductionRemovals="false"
+            introducedBy="">
+        <address>dynamic</address>
+        <paused>false</paused>
+        <autoAcceptFolders>false</autoAcceptFolders>
+        <untrusted>false</untrusted>
+    </device>
+
+    <!-- The hub is the only device a guest needs to know; it introduces the
+         others. introducer="true" sits on the guest's entry FOR the hub ("I
+         trust this device to tell me about others"); the hub marks nobody, and
+         two devices are never mutual introducers. autoAcceptFolders stays
+         false so a local path is always a decision.
+
+         Two paths, both needed, dialled in no particular order (priority comes
+         from the connectionPriority values below). There is deliberately no
+         "dynamic" entry: discovery cannot reach the NAS from behind VMware NAT
+         so it would resolve to nothing on every dial - add it back the day a
+         guest moves to bridged networking. Rationale:
+         capability.data-synchronisation.md, "Connectivity". -->
+    <device id="MANUALLY_FIX_HUB_DEVICE_ID" name="hub-qnap"
+            compression="metadata" introducer="true" skipIntroductionRemovals="false"
+            introducedBy="">
+        <!-- The LAN path, on the listener's real port. Not a tuning detail:
+             without it a guest at home dials the WAN address and hairpins into
+             the router, which needs NAT reflection - off on OPNsense - so the
+             dial fails. -->
+        <address>tcp://MANUALLY_FIX_HUB_LAN_ADDRESS:22000</address>
+        <address>quic://MANUALLY_FIX_HUB_LAN_ADDRESS:22000</address>
+        <!-- The public path, on the same fixed 22000: the router forwards
+             22000 to the hub's 22000, deliberately untranslated. Translating
+             the external port to a non-default one is a documented hardening
+             option, not taken (capability.data-synchronisation.md,
+             "Exposure"); taking it means changing the port in these two
+             addresses on every node. -->
+        <address>tcp://MANUALLY_FIX_HUB_ADDRESS:22000</address>
+        <address>quic://MANUALLY_FIX_HUB_ADDRESS:22000</address>
+        <paused>false</paused>
+        <autoAcceptFolders>false</autoAcceptFolders>
+        <untrusted>false</untrusted>
+    </device>
+
+    <gui enabled="true" tls="false" debugging="false" sendBasicAuthPrompt="false">
+        <!-- Loopback only, never on the network. Reach it with: sync-node gui -->
+        <address>127.0.0.1:8384</address>
+        <apikey>AUTOFILL_API_KEY</apikey>
+        <theme>default</theme>
+        <metricsWithoutAuth>false</metricsWithoutAuth>
+    </gui>
+
+    <ldap></ldap>
+
+    <options>
+        <!-- Listen addresses are explicit. The value "default" pulls in the
+             public relay pool, which is the vendor dependency this design
+             removes. -->
+        <listenAddress>tcp://0.0.0.0:22000</listenAddress>
+        <listenAddress>quic://0.0.0.0:22000</listenAddress>
+
+        <!-- No relay is built (capability.data-synchronisation.md, "The relay
+             decision"). A relay address that resolves to nothing is not
+             harmless: the listener supervisor retries forever, one WRN line
+             per attempt. If a relay is ever built, add the line below with the
+             real values and set relaysEnabled to true:
+
+             <listenAddress>relay://MANUALLY_FIX_RELAY_ADDRESS:22067/?id=MANUALLY_FIX_RELAY_DEVICE_ID&amp;token=MANUALLY_FIX_RELAY_TOKEN</listenAddress>
+        -->
+        <relaysEnabled>false</relaysEnabled>
+
+        <!-- No announcement ever reaches a Syncthing server. Local discovery
+             stays on for the vmnet (other VMs, the host laptop's Syncthing);
+             it never reaches the NAS. -->
+        <globalAnnounceEnabled>false</globalAnnounceEnabled>
+        <localAnnounceEnabled>true</localAnnounceEnabled>
+        <localAnnouncePort>21027</localAnnouncePort>
+
+        <!-- The whole estate counts as local. Without this a guest (always on
+             a different subnet from the NAS) classes the LAN path as WAN and
+             gives it priority 30 instead of 10. Also exempts these connections
+             from any later rate limit. -->
+        <alwaysLocalNet>10.66.0.0/16</alwaysLocalNet>
+
+        <!-- The guest dials out. Nothing dials in, so there is nothing to map. -->
+        <natEnabled>false</natEnabled>
+
+        <urAccepted>-1</urAccepted>
+        <crashReportingEnabled>false</crashReportingEnabled>
+
+        <!-- The image installs offline and upgrades belong to the image. The
+             packaged binary is a [noupgrade] build in any case. -->
+        <autoUpgradeIntervalH>0</autoUpgradeIntervalH>
+
+        <reconnectionIntervalS>60</reconnectionIntervalS>
+        <keepTemporariesH>24</keepTemporariesH>
+        <progressUpdateIntervalS>5</progressUpdateIntervalS>
+        <minHomeDiskFree unit="%">1</minHomeDiskFree>
+        <startBrowser>false</startBrowser>
+        <setLowPriority>true</setLowPriority>
+        <announceLANAddresses>true</announceLANAddresses>
+
+        <!-- Deliberately no unackedNotificationID element: listing an ID makes
+             the GUI SHOW that notification (an earlier draft listed one and
+             produced the auth nag on every fresh node). The red "Danger" panel
+             is a different mechanism, raised only off loopback. -->
+
+        <connectionPriorityTcpLan>10</connectionPriorityTcpLan>
+        <connectionPriorityQuicLan>20</connectionPriorityQuicLan>
+        <connectionPriorityTcpWan>30</connectionPriorityTcpWan>
+        <connectionPriorityQuicWan>40</connectionPriorityQuicWan>
+        <connectionPriorityRelay>50</connectionPriorityRelay>
+    </options>
+
+    <!-- The defaults carry the marker name too, so a folder added later
+         inherits the guard instead of falling back to .stfolder. The defaults
+         path is the share on purpose: an offered folder then draws a nested
+         path warning, and a second folder on this guest is a mistake (usually
+         a folder ID not matching the hub). -->
+    <defaults>
+        <folder path="/srv/dsfxn/share" type="sendreceive" rescanIntervalS="3600"
+                fsWatcherEnabled="true" fsWatcherDelayS="10" ignorePerms="false"
+                autoNormalize="true">
+            <filesystemType>basic</filesystemType>
+            <markerName>.dsfxn-share-marker</markerName>
+            <minDiskFree unit="%">5</minDiskFree>
+            <versioning type="staggered">
+                <param key="maxAge" val="2592000"></param>
+                <cleanupIntervalS>3600</cleanupIntervalS>
+            </versioning>
+            <maxConflicts>10</maxConflicts>
+        </folder>
+        <device compression="metadata" introducer="false" skipIntroductionRemovals="false"
+                introducedBy="">
+            <address>dynamic</address>
+            <autoAcceptFolders>false</autoAcceptFolders>
+        </device>
+        <ignores></ignores>
+    </defaults>
+</configuration>

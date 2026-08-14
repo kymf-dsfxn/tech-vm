@@ -25,5 +25,6 @@
   "DiskProvisioning": "monolithicSparse",
   "VdiskManagerPath": null,
   "EnableSecureBoot": false,
-  "DisableSideChannelMitigations": true
+  "DisableSideChannelMitigations": true,
+  "HostSharedDrives": "C:ro,X:rw,S:ro"
 }

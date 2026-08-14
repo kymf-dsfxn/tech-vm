@@ -7,94 +7,69 @@ network and no operator action.
 
 ## Inputs and outputs
 
-It reads `../00.host-config`. It writes to `output/<host>/`:
-
-```
-output/<host>/vm-ubuntu-26.04-<host>-<version>-amd64-<timestamp>.iso
-output/<host>/latest.txt        # the newest ISO name, for stage 02
-```
+It reads `../00.host-config`. It writes to `output/<host>/` (or a directory
+given as the third argument): the timestamped ISO and `latest.txt`, the newest
+ISO name, which is the stage-02 handoff.
 
 ## Build steps
 
-Build the offline repo once, then build an ISO per host.
+Build the offline repo and fetch the build tools once, then build an ISO per
+host. Both prerequisites are hard: `build-custom-iso.sh` fails without either
+cache.
 
 ```bash
 # 1. Fetch the package closure into an offline repo (needs docker or podman)
 ./scripts/build-package-repo.sh
 
-# 2. Fetch the pinned standalone build tools (syft, shfmt, uv; needs curl)
+# 2. Fetch the standalone build tools (syft, shfmt, uv; needs curl, tar, sha256sum)
 ./scripts/fetch-build-tools.sh
 
-# 3. Build a host ISO
+# 3. Build a host ISO (hosts are the <host>/ directories in 00.host-config)
 ./scripts/build-custom-iso.sh xd00-lde-0010 ~/iso/ubuntu-26.04-live-server-amd64.iso
-
-# Build all hosts
-for host in xd00-lde-0010 xd00-lde-0020 xd00-lde-0030; do
-  ./scripts/build-custom-iso.sh "$host" ~/iso/ubuntu-26.04-live-server-amd64.iso
-done
 ```
 
-Rebuild the repo only when `packages.list` changes. Refetch the build tools only
-when a pin in `fetch-build-tools.sh` changes. Both are cached under `.cache`
-(`.cache/apt-repo`, `.cache/build-tools`) and are not committed to git.
+Rebuild the repo only when `packages.list` changes. Refetch the build tools
+when a pin in `fetch-build-tools.sh` changes - and note uv defaults to
+`latest`, resolved at fetch time, so a refetch can move uv unless
+`--uv-version` pins it. Both caches live under `.cache` and are not committed.
+Each script's header documents its options; `build-custom-iso.sh` also honours
+`APT_REPO_DIR` and `BUILD_TOOLS_DIR` to relocate the caches.
 
 ## The offline apt repository
 
 Offline install needs every package on the ISO, because the base pool does not
 hold them all. `build-package-repo.sh` resolves the closure of
-`00.host-config/common/packages.list` inside a container that matches the target
-release, so the resolved versions match what the guest gets. It writes the
-`.deb` files and an apt `Packages` index. `build-custom-iso.sh` copies the repo
-onto the ISO. `guest-install.sh` installs from `file:///opt/vm-init/apt-repo`.
-
-A later phase may replace the build-time fetch with a managed repository
-artefact that has its own life cycle. The interface stays the same: a repo dir
-with a `Packages` index.
+`00.host-config/common/packages.list` inside a container that matches the
+target release, so the resolved versions match what the guest gets. The
+interface to the rest of the build is stable - a repo directory with a
+`Packages` index - so the build-time fetch could later be replaced by a managed
+repository artefact without touching anything downstream.
 
 ## Standalone build tools
 
 syft, shfmt and uv are not in apt, so they cannot come from the offline repo.
 `fetch-build-tools.sh` downloads them with checksum verification into
-`.cache/build-tools/bin`. syft and shfmt are pinned to the exact version and
-sha256 the sdlc build images use; uv is pinned to a version and verified against
-its published `.sha256` sidecar (leave `UV_VERSION=latest` to resolve the newest
-tag, or pass `--uv-version` to pin). `build-custom-iso.sh` copies the tree onto
-the ISO under `/autoinstall/vm-init/build-tools`, and `guest-install.sh` installs
-the binaries into `/usr/local/bin` with no network. These give the guest a full
-local Python build (syft for the SBOM step) and Python/shell tooling (uv, shfmt).
-
-## Requirements
-
-- `xorriso` and `python3` for the ISO build.
-- `docker` or `podman` for the package fetch.
-- `curl` for the build-tools fetch.
-- A stock Ubuntu 26.04 Live Server ISO.
+`.cache/build-tools/bin`; syft and shfmt are pinned to the exact version and
+sha256 the sdlc build images use. The ISO carries the tree, and
+`guest-install.sh` installs the binaries into `/usr/local/bin` with no network.
 
 ## Build metadata and the manifest
 
-The build reads `build_version`, generates a UTC timestamp, and computes the
-identity `vm-ubuntu-26.04-<host>-<version>-amd64`. It writes `build-info.env`
-and a planned `build-manifest.json` into the payload. The guest completes both:
-`guest-install.sh` records the installed package versions, the platform
-namespace and the install moment, and `guest-firstboot.sh` records which state
-the encrypted data disk was found in.
-
-Inside a built VM:
-
-```bash
-image-build-info
-# vm-ubuntu-26.04-xd00-lde-0010-2.2.0-amd64
-# 20260806T101500Z
-
-image-build-info --manifest
-# the full JSON manifest: recipe, planned, applied, firstboot
-```
+Metadata is recorded at three moments, each by the component that can know it.
+The build reads `build_version`, computes the identity
+`vm-ubuntu-26.04-<host>-<version>-amd64`, and writes `build-info.env` plus a
+planned `build-manifest.json` into the payload. `guest-install.sh` records the
+installed package versions, the platform namespace and the install moment.
+`guest-firstboot.sh` records which state the encrypted data disk was found in.
+Inside a built VM, `image-build-info` prints the identity and timestamp, and
+`image-build-info --manifest` the full JSON manifest.
 
 ## Stage 02 handoff
 
 `build-custom-iso.sh` writes `output/<host>/latest.txt` with the newest ISO
-name. Point the `02.vm-create` `vm-definition` `IsoPath` at that ISO. This keeps
-stage 02 in step with what stage 01 produced, and closes the old name drift.
+name. Stage 02 reads it: point the vm-definition's `IsoDir` (or `--iso-dir`) at
+the output tree and the newest build is picked up on every run. See
+`02.vm-create/README.md`.
 
 ## Boot behaviour
 
@@ -105,4 +80,10 @@ stage 02 in step with what stage 01 produced, and closes the old name drift.
 5. The install finishes and the VM reboots.
 6. On first boot, `vm-init-firstboot.service` detects the encrypted data disk
    and configures the SMB share, then disables itself. It never prompts: the
-   data disk is unlocked later, by hand, with `sudo data-disk unlock`.
+   data disk is unlocked later, by hand, with `sudo data-disk unlock` (see
+   `../capability.encrypted-datadisk.md`).
+
+Auto-install only happens on a direct boot of the ISO (`grub.cfg`). Booted as
+a file from another GRUB - a multiboot USB - the ISO's `loopback.cfg` offers
+only the interactive "Try or Install" entry, deliberately: a loopback boot
+targets some arbitrary physical machine, which must never be wiped unattended.

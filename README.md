@@ -14,4 +14,17 @@ pipeline has three numbered stages, and the numbers state the order.
 
 A booted VM installs and provisions itself: `guest-install.sh` runs at install
 and `guest-firstboot.sh` runs at first boot, both staged onto the ISO by stage
-01. Each stage has its own README.
+01. Each stage has its own README, kept to what the stage is and how it is
+used.
+
+Three technical capabilities span the stages, and each has its own design
+document - the rationale lives there, not in READMEs or code comments:
+
+- `capability.encrypted-datadisk.md` - the LUKS data disk: never unlocked at
+  boot, the operator lifecycle, the invariants, and the gated-service pattern.
+- `capability.data-synchronisation.md` - the Syncthing replication: estate
+  topology, the folder marker invariant, permission replication, node
+  bring-up, connectivity and operations.
+- `capability.host-data-access.md` - data between host and guest: the guest
+  serves its share over SMB, and reads the host drives over HGFS at
+  /mnt/C, /mnt/X, /mnt/S.

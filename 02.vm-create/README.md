@@ -7,231 +7,107 @@ the ISO installs and provisions itself (see `00.host-config`).
 ## Scripts
 
 - `create-vm-instance.py` writes the VM directory, the `.vmx`, and the virtual
-  disks.
-- `invoke-vmrun.py` controls a VM through `vmrun`: power, snapshots, clone, guest
-  IP.
-- `vmware_workstation.py` is the shared library both scripts import. It holds the
-  path resolution, the VMware binary discovery, the disk creation, the `.vmx`
-  assembly, and the `vmrun` call. It is not run on its own.
-- `get-host-ips.py` prints the host network adapters and their IPv4 addresses. Use
-  it to pick a bridged network or a free static IP.
+  disks. Subcommands: `run` creates the VM, `validate` checks the settings and
+  creates no VM.
+- `invoke-vmrun.py` controls a VM through `vmrun`: power, snapshots, clone,
+  guest IP. One subcommand per `vmrun` verb.
+- `vmware_workstation.py` is the shared library both scripts import. Not run on
+  its own.
+- `get-host-ips.py` prints the host network adapters and their IPv4 addresses.
+  Use it to pick a bridged network or a free static IP.
 
-The scripts are a Python port of the earlier PowerShell versions. Run them with
-`uv`, so the pinned interpreter and dependencies resolve the same way on every
-host.
-
-## Hardware shape
-
-`create-vm-instance.py` builds the Stage 0 VMware Workstation shape by default:
-
-- 4 vCPU, 12 GB RAM
-- PVSCSI controller
-- one core disk (32 GB) plus one data disk (512 GB)
-- `vmxnet3` networking, `nat` by default
-- UEFI firmware, Secure Boot off
-- boot delay and side-channel mitigation options written into the `.vmx`
-- HGFS disabled unconditionally; the guest is reached over SMB instead
-
-Override any default from the command line or a JSON definition file.
+The scripts are stdlib-only Python 3. The full flag surface, key constraints
+and value ranges are in `--help`; this README covers the concepts.
 
 ## Settings precedence
 
-Every setting resolves in one order, highest first: a command-line value, then the
-matching key in the `--config` JSON file, then the built-in default. Config keys
-are PascalCase (`VmName`, `CpuCount`, `MemoryMB`), matching the
-`vm-definition.<name>.json` files. Command-line flags are kebab-case
-(`--vm-name`, `--cpu-count`, `--memory-mb`).
+Every setting resolves in one order, highest first: a command-line value, then
+the matching key in the `--config` JSON file, then the built-in default. Config
+keys are PascalCase (`VmName`, `CpuCount`), command-line flags are kebab-case
+(`--vm-name`, `--cpu-count`). An explicit JSON `null` counts as absent, so the
+sample file's `null` entries fall through to the defaults and a required key
+cannot be satisfied by `null`.
 
-## Create a VM
+The built-in defaults describe the standard shape: 4 vCPU, 12 GB RAM, PVSCSI,
+one 32 GB core disk plus one 512 GB data disk, `vmxnet3` on `nat`, UEFI with
+Secure Boot off, and the host drives C:, X:, S: shared into the guest over
+HGFS (`HostSharedDrives`, below). The shipped `vm-definitions/*.json` files
+override parts of that shape; the definition file is the record of what a host
+actually gets.
 
-`create-vm-instance.py` has two subcommands: `run` creates the VM, `validate`
-checks the settings and creates nothing.
+## Creating a VM
 
 ```bash
-# From the command line, resolving the newest ISO from a directory
-uv run python scripts/create-vm-instance.py run \
-  --vm-name kymf-xd00-lde-0010 \
-  --vm-root-path C:\local-data\k-vm \
-  --iso-dir C:\local-data\k-vm\isos\xd00-lde-0010 \
-  --disable-side-channel-mitigations
-
-# From a definition file, with the ISO given on the command line
-uv run python scripts/create-vm-instance.py run \
+python scripts/create-vm-instance.py run \
   --config .\vm-definitions\vm-definition.kymf-xd00-lde-0010.json \
   --iso-dir C:\local-data\k-vm\isos --iso-host xd00-lde-0010
-
-# Check the settings without creating anything
-uv run python scripts/create-vm-instance.py validate \
-  --config .\vm-definitions\vm-definition.kymf-xd00-lde-0010.json \
-  --iso-dir C:\local-data\k-vm\isos --iso-host xd00-lde-0010 --strict
 ```
 
-A command-line flag overrides the same key in the config file, so one file drives
-many VMs:
-
-```bash
-uv run python scripts/create-vm-instance.py run \
-  --config .\vm-definitions\vm-definition.kymf-xd00-lde-0010.json \
-  --vm-name kymf-xd00-lde-0011 \
-  --vm-root-path C:\local-data\k-vm-dev
-```
-
-The `run` above writes:
-
-- `C:\local-data\k-vm\kymf-xd00-lde-0010\kymf-xd00-lde-0010.vmx`
-- `C:\local-data\k-vm\kymf-xd00-lde-0010\kymf-xd00-lde-0010-core.vmdk`
-- `C:\local-data\k-vm\kymf-xd00-lde-0010\kymf-xd00-lde-0010-data-01.vmdk`
-
-A run log lands in `<vm-root-path>/logs/<vm-name>.<timestamp>.log`.
-
-Run flags:
-
-- `--dry-run` shows the work without making changes.
-- `--force` deletes an existing target VM directory before it creates the new one.
-- `--skip-disk-creation` writes the `.vmx` but calls no `vmware-vdiskmanager`. Use
-  it to check `.vmx` generation on its own.
+Outputs land under `<VmRootPath>\<VmName>\`: the `.vmx`, `<name>-core.vmdk`,
+`<name>-data-NN.vmdk`, and a run log under `logs\`. `--dry-run` prints the work
+without creating the VM, `--force` replaces an existing VM directory,
+`--skip-disk-creation` writes only the `.vmx`.
 
 ## ISO selection
 
-The ISO is chosen at run time, not pinned in the definition file. This keeps the
-definition stable while stage 01 rebuilds the ISO under a new version and
-timestamp. Two flags name the source, and they are mutually exclusive:
-
-- `--iso-path` gives one exact ISO file.
-- `--iso-dir` gives a directory, and the script resolves the newest ISO in it.
-
-Inside an `--iso-dir`, the script prefers the `latest.txt` pointer that stage 01
-writes next to each host's ISO. When no pointer is present, it falls back to the
-newest `.iso` by modification time. The directory can be the host's own ISO
-folder, or a parent that holds a per-host subfolder: with `--iso-host xd00-lde-0010`
-(or an `IsoHost` config key) the script descends into that subfolder first. When
-you omit the host, it tries a subfolder named for the VM, then searches the
-directory itself.
-
-The full resolution order, highest first: `--iso-path`, then `--iso-dir`, then a
-config `IsoPath`, then a config `IsoDir`. A command-line value beats the config
-file, and an explicit path beats a directory lookup. When nothing resolves, the
-VM is created with no boot ISO.
-
-## Definition file
-
-The JSON file is flat, so it is easy to edit and easy to override from the command
-line. Copy `vm-definition.sample.json` to a working file, set the paths and the VM
-name, then pass it with `--config`. The supported keys are:
-
-`VmName`, `VmRootPath`, `IsoPath`, `IsoDir`, `IsoHost`, `CpuCount`,
-`CoresPerSocket`, `MemoryMB`, `CoreDiskSizeGB`, `DataDiskCount`, `DataDiskSizeGB`,
-`DataDiskSourcePath`, `NetworkType`, `NetworkName`, `GuestOs`, `Firmware`,
-`BootDelayMs`, `DisplayWidth`, `DisplayHeight`, `DisplayCount`, `NetworkAdapter`,
-`ScsiController`, `VirtualHardwareVersion`, `DiskProvisioning`,
-`VdiskManagerPath`, `EnableSecureBoot`, `DisableSideChannelMitigations`.
-
-`VmName` and `VmRootPath` are required. The three ISO keys are optional: the
-per-host definitions leave them out and name the ISO on the command line, so a
-definition never pins a stale ISO path. Set `IsoDir` and `IsoHost` in the file
-only if you want the config to carry the ISO source. Some keys are constrained.
-`NetworkType` is one of `bridged`, `nat`, `hostonly`, or `custom`. `Firmware` is
-`efi` or `bios`. `NetworkName` is required when `NetworkType` is `custom`.
+The ISO is chosen at run time, not pinned in the definition file, so the
+definition stays stable while stage 01 rebuilds the ISO under a new version and
+timestamp. `--iso-path` names one exact file; `--iso-dir` names a directory
+(mutually exclusive; config `IsoPath`/`IsoDir` behind them). Inside a
+directory, the `latest.txt` pointer that stage 01 writes wins; otherwise the
+newest `.iso` by modification time. `--iso-host` (or `IsoHost`) descends into a
+per-host subfolder first, then a subfolder named for the VM, then the directory
+itself. When nothing resolves, the VM is created with no boot ISO.
 
 ## Data disk: fresh or attach an existing one
 
-By default each data disk is created empty at `DataDiskSizeGB`. The guest then
-LUKS-encrypts it on first use (`sudo data-disk init` over SSH - see
-`00.host-config/README.md`).
+By default each data disk is created empty; the guest LUKS-encrypts it on first
+use (`sudo data-disk init` - see `../capability.encrypted-datadisk.md`).
 
-To move an already-encrypted data disk onto a new VM, name it with
-`--data-disk-source-path`:
+To move an already-encrypted data disk onto a new VM, name the source `.vmdk`
+with `--data-disk-source-path` (requires `DataDiskCount` 1 - the source
+descriptor maps onto exactly one slot). The source is copied, never moved: for
+a `splitSparse` source the extents are copied alongside and the descriptor's
+extent references are rewritten to the new base name, and a source referencing
+a missing extent fails before anything is copied. On the new VM,
+`guest-firstboot.sh` reports the disk as `locked`, `data-disk init` refuses it,
+and `data-disk unlock` with the original passphrase brings the data back. File
+ownership survives because the platform UID/GID are pinned.
 
-```bash
-uv run python scripts/create-vm-instance.py run \
-  --vm-name kymf-xd00-lde-0020 \
-  --vm-root-path C:\local-data\k-vm \
-  --data-disk-count 1 \
-  --data-disk-source-path C:\local-data\k-vm\kymf-xd00-lde-0010\kymf-xd00-lde-0010-data-01.vmdk
-```
+## Host and guest data access
 
-The source `.vmdk` is copied into the new VM directory under the new VM's
-standard data-disk name; it is never moved or modified. For a `splitSparse`
-source the `-s###.vmdk` extents are copied alongside and the descriptor's extent
-references are rewritten to the new base name, so the copy is self-contained.
-A source that references an extent which is not on disk fails before anything is
-copied.
+Two directions, two mechanisms (design: `../capability.host-data-access.md`).
 
-The setting requires `DataDiskCount` to be 1 - the source descriptor maps onto
-exactly one data-disk slot. Booting the new VM, `guest-firstboot.sh` detects the
-existing LUKS header and reports the disk as `locked`; `sudo data-disk init`
-refuses it, and `sudo data-disk unlock` with the original passphrase brings the
-data back. File ownership survives, because the platform UID/GID are pinned.
+The guest data root is reached over SMB
+(`net use Z: \\<guest-ip>\dsfxn /user:kymf`), and the share answers only while
+the data disk is unlocked - see `../capability.encrypted-datadisk.md`, "Samba".
+Get the guest IP with `invoke-vmrun.py get-guest-ip`; the default `nat` network
+is sufficient, because the host holds an address on the same vmnet segment.
 
-## Host access to the guest data root
-
-HGFS is disabled unconditionally (`isolation.tools.hgfs.disable = "TRUE"`); the
-`local-data-s` and `local-data-c` shared folders are gone. If those host trees
-are still needed in the guest, that has to be solved separately.
-
-The guest data root is reached over SMB instead:
-
-```
-net use Z: \\<guest-ip>\dsfxn /user:kymf
-```
-
-Get the guest IP with `invoke-vmrun.py get-guest-ip`, or `get-host-ips.py` for
-the host side of the NAT segment. The default `nat` network is sufficient: the
-host holds an address on the same vmnet segment. `NetworkType bridged` remains
-available if reachability is a problem.
-
-The share only answers while the data disk is unlocked. With the disk locked,
-`smbd` is still running and reachable, but the share refuses the connection
-("network name not found") rather than letting a client write into the empty
-mountpoint. Unlock it in the guest with `sudo data-disk unlock`.
-
-## Operate a VM
-
-Each `invoke-vmrun.py` subcommand maps to one `vmrun` verb: `list`, `start`,
-`stop`, `reset`, `suspend`, `pause`, `unpause`, `snapshot`, `delete-snapshot`,
-`list-snapshots`, `clone`, `get-guest-ip`.
-
-```bash
-uv run python scripts/invoke-vmrun.py start \
-  --vmx C:\local-data\k-vm\kymf-xd00-lde-0010\kymf-xd00-lde-0010.vmx \
-  --start-mode nogui
-
-uv run python scripts/invoke-vmrun.py snapshot \
-  --vmx C:\local-data\k-vm\kymf-xd00-lde-0010\kymf-xd00-lde-0010.vmx \
-  --snapshot-name empty
-
-uv run python scripts/invoke-vmrun.py get-guest-ip \
-  --vmx C:\local-data\k-vm\kymf-xd00-lde-0010\kymf-xd00-lde-0010.vmx
-```
-
-`start` takes `--start-mode {gui,nogui}`. `stop`, `reset`, and `suspend` take
-`--stop-mode {soft,hard}`. `clone` takes `--clone-path` and
-`--clone-type {full,linked}`. Every action takes `--dry-run`, which prints the
-`vmrun` command and runs nothing.
+The guest reaches the host drives over HGFS at `/mnt/C`, `/mnt/X`, `/mnt/S`
+(C and S read-only, X read-write), automounted on access and tolerant of an
+absent drive. `HostSharedDrives` configures the share list - a comma list of
+`<letter>[=<host-path>][:ro|:rw]`, default `C:ro,X:rw,S:ro`; an empty string
+turns HGFS off. The `.vmx` then also carries `msg.autoAnswer = "TRUE"`, so a
+power-on with the external drive unplugged never blocks an unattended
+`vmrun start`.
 
 ## Tool resolution
 
-Both scripts locate the VMware binaries in this order:
-
-- `PATH`
-- `C:\Program Files (x86)\VMware\VMware Workstation\`
-- `C:\Program Files\VMware\VMware Workstation\`
-
-Pass `--vmrun-path` or `--vdisk-manager-path` when your install sits elsewhere.
+The VMware binaries are found by explicit flag (`--vmrun-path`,
+`--vdisk-manager-path`) first, then `PATH`, then the two
+`Program Files` install trees.
 
 ## Stage 01 handoff
 
-`01.iso-build` writes `output/<host>/latest.txt` with the newest ISO name. Point
-`--iso-dir` at that host output directory (or a parent, with `--iso-host`), and
-the script reads `latest.txt` and attaches the ISO it names. Stage 02 stays in
-step with what stage 01 built, and no ISO path is copied by hand. If you keep the
-built ISOs elsewhere, point `--iso-dir` at that folder: with no `latest.txt` the
-script attaches the newest `.iso` there.
+`01.iso-build` writes `output/<host>/latest.txt` with the newest ISO name.
+Point `--iso-dir` at that output tree (with `--iso-host`), and every run
+attaches the ISO the pointer names - no ISO path is ever copied by hand.
 
 ## Guest provisioning
 
-Stage 02 does not touch the guest OS. The custom ISO installs and provisions the
-guest with no operator action: `guest-install.sh` runs at install and
-`guest-firstboot.sh` runs at first boot, both from `00.host-config`. The static
-IP comes from the per-host `autoinstall/user-data`, not from a script in this
+Stage 02 does not touch the guest OS. The custom ISO installs and provisions
+the guest with no operator action: `guest-install.sh` at install,
+`guest-firstboot.sh` at first boot, both from `00.host-config`. The static IP
+comes from the per-host `autoinstall/user-data`, not from a script in this
 stage.

@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
 """make-manifest.py - build and complete the VM image build manifest.
 
-The manifest records what this ISO-build approach put on the machine. It has two
-moments, the same split the build metadata uses for its timestamps:
+  plan       Build host, at ISO assembly: what the ISO intends to install.
+  apply      Guest, at install: what actually landed, per dpkg.
+  firstboot  Guest, at first boot: data-disk state and Syncthing mechanism.
 
-  plan       On the build host, at ISO assembly. Records what the ISO intends to
-             install: identity, version, timestamp, payload files, staged
-             packages, and tarballs. Written onto the ISO.
-
-  apply      In the guest, at install. Copies the planned manifest, then records
-             what actually landed: the installed version of each package as dpkg
-             reports it, the platform namespace the guest was built for, and the
-             install timestamp.
-
-  firstboot  In the guest, at first boot. Adds the runtime results: which state
-             the encrypted data disk was found in, and its identifiers. First
-             boot never unlocks the disk, so the filesystem UUID is only present
-             if something had already unlocked it.
-
-The manifest is a single JSON file. It is read by `image-build-info --manifest`.
+Identity/config live on the encrypted disk, unknowable at first boot, so
+they are recorded as null rather than guessed.
 """
 
 import argparse
@@ -27,6 +15,12 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timezone
+
+# platform_node sits beside this file when staged into /opt/vm-init, and in
+# ../guest-bin in the repo tree (where the build host runs `plan`).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "guest-bin"))
+import platform_node  # noqa: E402
 
 
 def _now():
@@ -84,6 +78,35 @@ def _dpkg_version(pkg):
         return None
 
 
+def _file_present(path):
+    return bool(path) and os.path.isfile(path)
+
+
+def _user_present(name):
+    """Is this account in /etc/passwd?"""
+    if not name or not os.path.isfile("/etc/passwd"):
+        return None
+    with open("/etc/passwd", encoding="utf-8", errors="replace") as handle:
+        return any(line.split(":", 1)[0] == name for line in handle)
+
+
+def _sync_state(args):
+    """Syncthing state on this node. The mechanism on the OS disk is knowable;
+    identity/config on the encrypted disk are null until it is mounted."""
+    identity = config = None
+    if args.data_state == "unlocked" and args.sync_home:
+        identity = os.path.isfile(os.path.join(args.sync_home, "key.pem"))
+        config = os.path.isfile(os.path.join(args.sync_home, "config.xml"))
+    return {
+        "syncthing_version": _dpkg_version("syncthing"),
+        "template_present": _file_present(args.sync_template),
+        "dropin_present": _file_present(args.sync_dropin),
+        "sync_user_present": _user_present(args.sync_user),
+        "identity_present": identity,
+        "config_present": config,
+    }
+
+
 def cmd_plan(args):
     packages = _read_packages(args.packages)
     repo_versions = _repo_versions(args.repo) if args.repo else {}
@@ -120,6 +143,12 @@ def cmd_apply(args):
             {"name": name, "version": _dpkg_version(name)}
             for name in packages
         ],
+        # Installed from payload/extra_deb/, not packages.list, so nothing above
+        # records them; without this the manifest cannot name their versions.
+        "payload_packages": [
+            {"name": name, "version": _dpkg_version(name)}
+            for name in (args.payload_package or [])
+        ],
     }
     _write(manifest, args.out)
 
@@ -136,6 +165,7 @@ def cmd_firstboot(args):
             "luks_uuid": args.luks_uuid or None,
             "filesystem_uuid": args.data_uuid or None,
         },
+        "sync": _sync_state(args),
     }
     _write(manifest, args.out)
 
@@ -173,6 +203,10 @@ def main():
     p_apply.add_argument("--packages", required=True)
     p_apply.add_argument("--platform-namespace", default="",
                          help="platform_namespace label this guest was built for")
+    p_apply.add_argument("--payload-package", action="append", default=[],
+                         metavar="NAME",
+                         help="package installed from payload/extra_deb/ rather "
+                              "than packages.list (repeatable)")
     p_apply.add_argument("--out", required=True)
     p_apply.set_defaults(func=cmd_apply)
 
@@ -181,12 +215,22 @@ def main():
     p_fb.add_argument("--data-device", default="", help="data disk block device")
     p_fb.add_argument("--data-partition", default="", help="data disk partition")
     p_fb.add_argument("--data-state", default="",
-                      choices=["", "absent", "uninitialised", "locked", "opened", "unlocked"],
-                      help="data disk state as guest-firstboot.sh classified it")
+                      choices=[""] + list(platform_node.STATES),
+                      help="data disk state, the six-state vocabulary shared "
+                           "with data-disk and guest-firstboot.sh")
     p_fb.add_argument("--luks-name", default="", help="dm-crypt mapper name")
     p_fb.add_argument("--luks-uuid", default="", help="LUKS header UUID")
     p_fb.add_argument("--data-uuid", default="",
                       help="ext4 filesystem UUID (only knowable while unlocked)")
+    p_fb.add_argument("--sync-template", default="",
+                      help="path to the Syncthing node config template")
+    p_fb.add_argument("--sync-dropin", default="",
+                      help="path to the syncthing@.service data-disk drop-in")
+    p_fb.add_argument("--sync-user", default="",
+                      help="Syncthing service account name")
+    p_fb.add_argument("--sync-home", default="",
+                      help="STHOMEDIR on the encrypted disk (only readable while "
+                           "unlocked)")
     p_fb.set_defaults(func=cmd_firstboot)
 
     args = parser.parse_args()

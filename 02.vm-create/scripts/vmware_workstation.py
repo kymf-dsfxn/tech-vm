@@ -1,18 +1,7 @@
 #!/usr/bin/env python3
 
-# Shared helpers for the VMware Workstation VM-create tooling.
-#
-# Python port of vmware-workstation-common.ps1. This is a library module, not a
-# runnable script: create-vm-instance.py and invoke-vmrun.py import it, the same
-# way the PowerShell scripts dot-sourced the .ps1 common file.
-#
-# Contents:
-#   resolve_full_path        -- absolute, normalised path (Resolve-FullPath)
-#   resolve_vmware_binary    -- locate vmrun.exe / vmware-vdiskmanager.exe
-#   create_virtual_disk      -- vmware-vdiskmanager -c (New-VMwareVirtualDisk)
-#   copy_virtual_disk        -- attach an existing .vmdk by copying it in
-#   build_vmx_content        -- assemble the .vmx text (New-VMwareVmxContent)
-#   invoke_vmrun             -- run vmrun with an argument list (Invoke-VMwareVmrun)
+# Shared library for the VMware Workstation VM-create tooling. Imported by
+# create-vm-instance.py and invoke-vmrun.py; not runnable on its own.
 
 import os
 import re
@@ -23,12 +12,7 @@ import subprocess
 # -- Path resolution -----------------------------------------------------
 
 def resolve_full_path(path: str) -> str:
-    """Return an absolute, normalised path.
-
-    Mirrors Resolve-FullPath: absolute input is normalised as-is, relative
-    input is joined to the current working directory first. os.path.abspath
-    does both.
-    """
+    """Return an absolute, normalised path; relative input resolves against cwd."""
     return os.path.abspath(path)
 
 
@@ -37,7 +21,7 @@ def resolve_full_path(path: str) -> str:
 def resolve_vmware_binary(tool_name: str, explicit_path: str = None) -> str:
     """Locate a VMware Workstation binary.
 
-    Order (mirrors Resolve-VMwareBinary):
+    Order:
       1. An explicit path, if given (must exist).
       2. The tool on PATH.
       3. The standard install dirs under %ProgramFiles(x86)% / %ProgramFiles%.
@@ -82,12 +66,8 @@ _DISK_TYPE_CODES = {
 def create_virtual_disk(path: str, size_gb: int, vdiskmanager_path: str,
                         provisioning: str = "monolithicSparse",
                         dry_run: bool = False) -> None:
-    """Create a VMware virtual disk with vmware-vdiskmanager.
-
-    Mirrors New-VMwareVirtualDisk, including the "disk already exists" guard,
-    which fires even in dry-run mode (the PowerShell version checks before its
-    ShouldProcess gate).
-    """
+    """Create a VMware virtual disk with vmware-vdiskmanager. The "disk already
+    exists" guard fires even in dry-run mode."""
     resolved = resolve_full_path(path)
     disk_dir = os.path.dirname(resolved)
     if not os.path.isdir(disk_dir):
@@ -124,14 +104,17 @@ def create_virtual_disk(path: str, size_gb: int, vdiskmanager_path: str,
 
 
 _DESCRIPTOR_MARKERS = (b"# Disk DescriptorFile", b"# Extent description")
+# A standalone text descriptor is small by construction (~40 bytes per extent;
+# a 512 GB splitSparse disk has ~256 extent lines, ~10 KB). Anything above this
+# limit that still looks like a text descriptor is malformed rather than large.
+_DESCRIPTOR_MAX_BYTES = 1024 * 1024
 
 
 def _extent_names(descriptor_bytes: bytes) -> list:
     """Extent .vmdk filenames referenced by a text disk descriptor.
 
     Extent lines look like: RW 8388608 SPARSE "name-s001.vmdk"
-    Returns [] for a binary (monolithicSparse) file, which carries its data and
-    its embedded descriptor in the one file and references nothing external.
+    Returns [] for a binary (monolithicSparse) descriptor region.
     """
     head = descriptor_bytes[:512]
     if not any(marker in head for marker in _DESCRIPTOR_MARKERS):
@@ -145,17 +128,10 @@ def copy_virtual_disk(source_path: str, target_path: str,
                       dry_run: bool = False) -> None:
     """Copy an existing virtual disk into a new VM directory under a new name.
 
-    Used to attach an already-provisioned data disk to a new VM instead of
-    creating a fresh one. Carries the same "disk already exists" guard as
-    create_virtual_disk(), which fires even in dry-run mode.
-
-    Handles both provisioning layouts:
-      monolithicSparse  One self-contained file. A straight copy.
-      splitSparse       A text descriptor plus -s###.vmdk extents. The extents
-                        are copied alongside under the new base name, and the
-                        descriptor's extent references are rewritten to match.
-                        Without that rewrite the copied descriptor would still
-                        name the source disk's extent files.
+    Copies descriptor plus extents for both provisioning layouts. Extent
+    references in the copied descriptor are rewritten to the target stem (a
+    whole-file stem replace). Missing extents fail before any copy, so no
+    half-copied disk is left.
     """
     resolved_source = resolve_full_path(source_path)
     resolved_target = resolve_full_path(target_path)
@@ -173,12 +149,22 @@ def copy_virtual_disk(source_path: str, target_path: str,
     source_stem = os.path.basename(resolved_source)[: -len(".vmdk")]
     target_stem = os.path.basename(resolved_target)[: -len(".vmdk")]
 
+    # Read the whole descriptor, not a fixed head: a truncated read would
+    # silently drop extents past the cut from the missing-check, the copy and
+    # the rewrite. Binary monolithic files never match the markers, so only
+    # small text descriptors are ever read in full.
     with open(resolved_source, "rb") as handle:
-        descriptor_head = handle.read(4096)
-    extents = _extent_names(descriptor_head)
+        descriptor_bytes = handle.read(_DESCRIPTOR_MAX_BYTES + 1)
+    if (len(descriptor_bytes) > _DESCRIPTOR_MAX_BYTES
+            and any(marker in descriptor_bytes[:512]
+                    for marker in _DESCRIPTOR_MARKERS)):
+        raise RuntimeError(
+            f"Text descriptor larger than {_DESCRIPTOR_MAX_BYTES} bytes, "
+            f"refusing to copy a disk it may describe incompletely: "
+            f"{resolved_source}"
+        )
+    extents = _extent_names(descriptor_bytes)
 
-    # A referenced extent that is not on disk means an incomplete source disk.
-    # Fail before copying anything rather than leaving a half-copied disk.
     missing = [name for name in extents
                if not os.path.isfile(os.path.join(source_dir, name))]
     if missing:
@@ -220,19 +206,46 @@ def copy_virtual_disk(source_path: str, target_path: str,
 
 # -- VMX content ---------------------------------------------------------
 
+def parse_host_shared_drives(spec: str) -> list:
+    """Parse a HostSharedDrives value: a comma list of
+    <letter>[=<host-path>][:ro|:rw], default path <letter>:\\, default ro.
+    Returns [{'GuestName', 'HostPath', 'WriteAccess'}]; raises ValueError.
+    Convention: share name = drive letter, guest mountpoint = /mnt/<letter>
+    (capability.host-data-access.md)."""
+    shares = []
+    seen = set()
+    for token in filter(None, (t.strip() for t in (spec or "").split(","))):
+        body, access = token, "ro"
+        if body[-3:].lower() in (":ro", ":rw"):
+            access = body[-2:].lower()
+            body = body[:-3]
+        letter, _, host_path = body.partition("=")
+        letter = letter.strip()
+        if len(letter) != 1 or not letter.isalpha():
+            raise ValueError(
+                f"HostSharedDrives entry {token!r}: the share name must be a "
+                f"single drive letter, optionally =<host-path> and :ro|:rw"
+            )
+        letter = letter.upper()
+        if letter in seen:
+            raise ValueError(f"HostSharedDrives lists drive {letter} twice")
+        seen.add(letter)
+        shares.append({
+            "GuestName": letter,
+            "HostPath": host_path.strip() or f"{letter}:\\",
+            "WriteAccess": access == "rw",
+        })
+    return shares
+
+
 def _vmx_line(name: str, value) -> str:
-    """Format one VMX line: name = "value" (New-VmxLine)."""
+    """Format one VMX line: name = "value"."""
     return '{0} = "{1}"'.format(name, "" if value is None else value)
 
 
 def build_vmx_content(definition: dict) -> str:
-    """Assemble the full .vmx file text from a definition dict.
-
-    Faithful port of New-VMwareVmxContent: same keys, same values, same order.
-    Lines are joined with CRLF and the text ends with a trailing CRLF, matching
-    the PowerShell output on Windows. Booleans are the strings 'TRUE'/'FALSE',
-    exactly as the caller supplies them.
-    """
+    """Assemble the full .vmx file text from a definition dict. Lines are
+    joined with CRLF and the text ends with a trailing CRLF."""
     lines = []
     lines.append(_vmx_line(".encoding", "UTF-8"))
     lines.append(_vmx_line("config.version", "8"))
@@ -265,9 +278,29 @@ def build_vmx_content(definition: dict) -> str:
     lines.append(_vmx_line("floppy0.present", "FALSE"))
     lines.append(_vmx_line("sound.present", "FALSE"))
 
-    # HGFS is disabled unconditionally. The guest reaches the platform data disk
-    # over SMB instead, so there are no host shared folders to configure.
-    lines.append(_vmx_line("isolation.tools.hgfs.disable", "TRUE"))
+    # HGFS carries host data guest-ward, mounted under /mnt/<letter>; the
+    # platform share still travels host-ward over SMB. Design:
+    # capability.host-data-access.md. No shares configured -> HGFS off.
+    shares = definition.get("HostSharedFolders") or []
+    if shares:
+        lines.append(_vmx_line("isolation.tools.hgfs.disable", "FALSE"))
+        lines.append(_vmx_line("sharedFolder.maxNum", len(shares)))
+        for index, share in enumerate(shares):
+            prefix = f"sharedFolder{index}"
+            lines.append(_vmx_line(f"{prefix}.present", "TRUE"))
+            lines.append(_vmx_line(f"{prefix}.enabled", "TRUE"))
+            lines.append(_vmx_line(f"{prefix}.readAccess", "TRUE"))
+            lines.append(_vmx_line(f"{prefix}.writeAccess",
+                                   "TRUE" if share["WriteAccess"] else "FALSE"))
+            lines.append(_vmx_line(f"{prefix}.hostPath", share["HostPath"]))
+            lines.append(_vmx_line(f"{prefix}.guestName", share["GuestName"]))
+            lines.append(_vmx_line(f"{prefix}.expiration", "never"))
+        # A power-on with a share's host path absent raises a Workstation
+        # dialog that would block an unattended `vmrun start`; auto-answer
+        # dismisses it and the share is unavailable for that session.
+        lines.append(_vmx_line("msg.autoAnswer", "TRUE"))
+    else:
+        lines.append(_vmx_line("isolation.tools.hgfs.disable", "TRUE"))
 
     lines.append(_vmx_line("mks.enable3d", "FALSE"))
     lines.append(_vmx_line("svga.vramSize", "8388608"))
@@ -301,11 +334,7 @@ def build_vmx_content(definition: dict) -> str:
 
 
 def write_vmx_file(path: str, content: str) -> None:
-    """Write VMX text as ASCII with CRLF line endings preserved.
-
-    newline='' stops Python from translating the explicit CRLFs in content.
-    Encoding matches the PowerShell 'Set-Content -Encoding ASCII'.
-    """
+    """Write VMX text as ASCII; newline='' stops translation of the explicit CRLFs."""
     with open(path, "w", encoding="ascii", newline="") as handle:
         handle.write(content)
 
@@ -313,11 +342,7 @@ def write_vmx_file(path: str, content: str) -> None:
 # -- vmrun ---------------------------------------------------------------
 
 def invoke_vmrun(vmrun_path: str, arguments, dry_run: bool = False) -> int:
-    """Run vmrun with the given arguments (Invoke-VMwareVmrun).
-
-    Returns the exit code. Raises RuntimeError on a non-zero exit, matching the
-    PowerShell throw.
-    """
+    """Run vmrun; returns the exit code, raises RuntimeError on a non-zero exit."""
     args = [vmrun_path] + list(arguments)
     if dry_run:
         print(f"  [dry-run] {subprocess.list2cmdline(args)}")

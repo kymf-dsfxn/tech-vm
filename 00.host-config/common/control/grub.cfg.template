@@ -1,3 +1,4 @@
+# No 'set default=' - entry order decides, so the autoinstall entry below must stay first.
 set timeout=5
 
 loadfont unicode

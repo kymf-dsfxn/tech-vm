@@ -1,24 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
-# guest-install.sh
+# guest-install.sh - install-time guest provisioning.
 #
-# Install-time guest provisioning. The autoinstall late-commands copy the
-# vm-init payload onto the target and run this script inside the target with
-# `curtin in-target`. It runs in a chroot on the installed root, so all paths
-# are guest paths and the network is not required.
+# Run inside the target by the autoinstall late-commands (`curtin in-target`):
+# a chroot on the installed root, guest paths, no network needed. Installs
+# packages from the on-ISO repo, places the payload, establishes the platform
+# identity (/etc/platform.env), and installs mechanism only - it never touches
+# the data disk and never creates sync state. Detection is guest-firstboot.sh's
+# job; identity and config are the operator's, on the encrypted disk. Design:
+# capability.encrypted-datadisk.md, capability.data-synchronisation.md.
 #
-# It installs every package from the on-ISO apt repo, places the payload files,
-# establishes the platform layer identity (the platform_namespace users and
-# groups, recorded in /etc/platform.env), sets the locale, unpacks Maven and
-# Liquibase, installs the company CA, writes the MOTD banner, and records the
-# build metadata and the applied manifest. It also installs the data-disk
-# lifecycle command and the noauto fstab entry the encrypted data disk mounts
-# through, but it never touches the disk itself: detection needs the running
-# kernel, so guest-firstboot.sh classifies it at first boot, and unlocking is an
-# operator action over SSH.
-#
-# The script is idempotent enough to re-run during development, but it is meant
-# to run once, at install.
+# Idempotent enough to re-run during development; meant to run once.
 # =============================================================================
 
 set -euo pipefail
@@ -36,20 +28,23 @@ BUILD_TOOLS_DIR="${VM_INIT_DIR}/build-tools"
 NAMED_USER="kymf"
 
 # --- Platform layer identity -------------------------------------------------
-# OS-level customisations and service deployment choices belong to the platform
-# layer. One label, the platform_namespace, derives all of it: the platform
-# shared user and group, the <namespace>_node_mgmt node management user and
-# group, and the platform shared data root. This is the single place the label
-# is written; guest-firstboot.sh and /usr/local/bin/data-disk read it back from
-# /etc/platform.env. UID/GID are pinned so a data disk carried between nodes
-# keeps valid file ownership across a rename.
+# One label, the platform_namespace, derives the platform users, groups and
+# data root. This is the single place the label is written; everything
+# guest-side reads it back from /etc/platform.env. UID/GID are pinned so a data
+# disk carried between nodes keeps valid ownership across a rename.
 PLATFORM_ENV="/etc/platform.env"
 PLATFORM_NAMESPACE="dsfxn"
 PLATFORM_CORE_USER="${PLATFORM_NAMESPACE}"
 PLATFORM_CORE_UID=500
 PLATFORM_NODE_MGMT_USER="${PLATFORM_NAMESPACE}_node_mgmt"
 PLATFORM_NODE_MGMT_UID=501
+PLATFORM_SYNC_USER="stsync"
+PLATFORM_SYNC_UID=502
 PLATFORM_DATA_ROOT="/srv/${PLATFORM_NAMESPACE}"
+# The share replicates and is served over SMB; the state directory holds each
+# consumer's own state. data-disk creates both, sync-node reads them from here.
+PLATFORM_DATA_SHARE="${PLATFORM_DATA_ROOT}/share"
+PLATFORM_DATA_STATE="${PLATFORM_DATA_ROOT}/.platform"
 
 log()  { echo "==> $*"; }
 info() { echo "    $*"; }
@@ -64,9 +59,8 @@ log "Guest install starting for ${HOSTNAME_FULL}"
 
 # --- APT: no recommends, then point APT at the on-ISO repo -------------------
 log "Configure APT (offline, on-ISO repo)"
+# apt-minimal.conf carries the no-recommends/no-suggests pair.
 install -m 0644 "${PAYLOAD_CFG}/apt-minimal.conf" /etc/apt/apt.conf.d/99minimal
-printf 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";\n' \
-    > /etc/apt/apt.conf.d/99-no-recommends
 
 # Local flat repo. [trusted=yes] because the debs are staged, not signed.
 printf 'deb [trusted=yes] file://%s ./\n' "${APT_REPO_DIR}" \
@@ -117,7 +111,12 @@ PLATFORM_CORE_USER=${PLATFORM_CORE_USER}
 PLATFORM_CORE_UID=${PLATFORM_CORE_UID}
 PLATFORM_NODE_MGMT_USER=${PLATFORM_NODE_MGMT_USER}
 PLATFORM_NODE_MGMT_UID=${PLATFORM_NODE_MGMT_UID}
+PLATFORM_SYNC_USER=${PLATFORM_SYNC_USER}
+PLATFORM_SYNC_UID=${PLATFORM_SYNC_UID}
 PLATFORM_DATA_ROOT=${PLATFORM_DATA_ROOT}
+PLATFORM_DATA_SHARE=${PLATFORM_DATA_SHARE}
+PLATFORM_DATA_STATE=${PLATFORM_DATA_STATE}
+PLATFORM_NAMED_USER=${NAMED_USER}
 EOF
 chmod 0644 "${PLATFORM_ENV}"
 info "Wrote ${PLATFORM_ENV}"
@@ -147,8 +146,20 @@ chmod 0600 "/home/${PLATFORM_NODE_MGMT_USER}/.ssh/authorized_keys"
 chown "${PLATFORM_NODE_MGMT_USER}:${PLATFORM_NODE_MGMT_USER}" \
     "/home/${PLATFORM_NODE_MGMT_USER}/.ssh/authorized_keys"
 
-# Named user (kymf, auto UID/GID). A person, not a platform concept: the name
-# stays as it is, only the platform group it joins is derived.
+# Syncthing service account, not a login. Private primary group keeps its own
+# state 0700 under a group nothing else joins; supplementary
+# ${PLATFORM_CORE_USER} is what lets it write into the share. /nonexistent as
+# home is what the packaged unit expects (InaccessiblePaths=-/nonexistent);
+# STHOMEDIR in the drop-in names the real home on the encrypted disk.
+groupadd --gid "${PLATFORM_SYNC_UID}" "${PLATFORM_SYNC_USER}"
+useradd --comment "syncthing service account" --system \
+    --uid "${PLATFORM_SYNC_UID}" --gid "${PLATFORM_SYNC_UID}" \
+    --groups "${PLATFORM_CORE_USER}" \
+    --shell /usr/sbin/nologin --home-dir /nonexistent --no-create-home \
+    "${PLATFORM_SYNC_USER}"
+
+# Named user: a person, not a platform concept. Only the group it joins is
+# derived.
 useradd --comment "${NAMED_USER}" --create-home --shell /bin/bash \
     --groups "${PLATFORM_CORE_USER}",sudo "${NAMED_USER}"
 printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${NAMED_USER}" \
@@ -190,8 +201,6 @@ else
 fi
 
 # --- Liquibase (from payload tarball) ----------------------------------------
-# Closes the old gap: the tarball shipped in the bundle but setup-vm.sh never
-# installed it.
 log "Install Liquibase"
 LIQUIBASE_TARBALL="$(find "${PAYLOAD_TGZ}" -maxdepth 1 -name 'liquibase-*.tar.gz' | head -1)"
 if [[ -n "${LIQUIBASE_TARBALL}" ]]; then
@@ -205,10 +214,8 @@ else
 fi
 
 # --- Standalone build tools (syft, shfmt, uv) --------------------------------
-# Pinned binaries fetched at ISO-build time by fetch-build-tools.sh and staged
-# under build-tools/bin. They are not apt packages, so they are copied straight
-# into /usr/local/bin here. syft is required by the Python SBOM step; shfmt and
-# uv complete the local Python/shell build toolchain.
+# Not apt packages: fetched at ISO-build time by fetch-build-tools.sh, copied
+# straight into /usr/local/bin.
 log "Install standalone build tools"
 if [[ -d "${BUILD_TOOLS_DIR}/bin" ]]; then
     install -m 0755 "${BUILD_TOOLS_DIR}/bin/"* /usr/local/bin/
@@ -218,12 +225,10 @@ else
 fi
 
 # --- Rootless podman socket (Docker-API compatibility) -----------------------
-# Enable the per-user podman socket for every user so Docker-API clients
-# (Testcontainers, the fabric8 docker-maven-plugin) can reach a daemonless
-# engine. `--global` writes user-unit symlinks only; it needs no running
-# systemd, so it is safe in this install-time chroot. The socket activates in
-# each user's systemd session at login. See the project's build-container
-# socket decision note for why this lives on the VM and not in wsl-kf.
+# Per-user podman socket for Docker-API clients (Testcontainers, fabric8).
+# `--global` writes user-unit symlinks only, so it is safe in this chroot; the
+# socket activates per user at login. Why on the VM and not wsl-kf: the
+# project's build-container socket decision note.
 log "Enable rootless podman socket for all users"
 if [[ -f /usr/lib/systemd/user/podman.socket ]]; then
     systemctl --global enable podman.socket || info "podman.socket enable failed"
@@ -247,23 +252,68 @@ else
     info "No CA .deb in payload, skipping"
 fi
 
+# --- Syncthing (from payload .deb) -------------------------------------------
+# The filename is the version pin (not in packages.list on purpose). Mechanism
+# only: no identity, no rendered config - the operator creates those on the
+# encrypted disk. Unit left disabled; `data-disk unlock` starts it. Rationale:
+# capability.data-synchronisation.md.
+log "Install Syncthing from the payload .deb"
+SYNCTHING_DEB="$(find "${PAYLOAD_DEB}" -maxdepth 1 -name 'syncthing_*_amd64.deb' | head -1)"
+if [[ -n "${SYNCTHING_DEB}" ]]; then
+    apt-get install -y "${SYNCTHING_DEB}"
+    install -m 0755 "${VM_INIT_DIR}/sync-node" /usr/local/bin/sync-node
+    install -d -m 0755 /etc/syncthing
+    install -m 0644 "${PAYLOAD_CFG}/syncthing/node-config.xml.template" \
+        /etc/syncthing/node-config.xml.template
+    install -d -m 0755 \
+        "/etc/systemd/system/syncthing@${PLATFORM_SYNC_USER}.service.d"
+    install -m 0644 "${PAYLOAD_CFG}/syncthing/data-disk.conf" \
+        "/etc/systemd/system/syncthing@${PLATFORM_SYNC_USER}.service.d/data-disk.conf"
+
+    # Running out of watches is quiet (fallback to periodic scans). The
+    # filename must not be 30-syncthing.conf: that would replace the package's
+    # QUIC-buffer sysctl file whole rather than add to it.
+    printf 'fs.inotify.max_user_watches = 524288\n' \
+        > /etc/sysctl.d/31-syncthing-watches.conf
+    chmod 0644 /etc/sysctl.d/31-syncthing-watches.conf
+
+    info "Installed ${SYNCTHING_DEB##*/}, unit left disabled"
+else
+    info "No Syncthing .deb in payload, skipping"
+fi
+
 # --- Data disk lifecycle command ---------------------------------------------
-# The data disk is LUKS encrypted and is never unlocked at boot: no crypttab
-# entry, and a noauto fstab entry so nothing pulls the mount into
-# local-fs.target. An operator unlocks it deliberately over SSH with
-# `sudo data-disk unlock`. The fstab entry is written here rather than at first
-# boot so the mount options, and the srv-<namespace>.mount unit systemd derives
-# from them, exist from image build onwards.
+# Never unlocked at boot: no crypttab, noauto fstab. The fstab entry is written
+# here so the srv-<namespace>.mount unit systemd derives from it exists from
+# image build onwards. Rationale: capability.encrypted-datadisk.md.
 log "Install the data disk lifecycle command"
+# platform_node.py is the shared library data-disk, sync-node and
+# guest-firstboot.sh use; it lives beside the commands so Python finds it.
+install -m 0755 "${VM_INIT_DIR}/platform_node.py" /usr/local/bin/platform_node.py
 install -m 0755 "${VM_INIT_DIR}/data-disk" /usr/local/bin/data-disk
 DATA_FSTAB_LINE="/dev/mapper/${PLATFORM_NAMESPACE}_data ${PLATFORM_DATA_ROOT} ext4 noauto 0 0"
 if ! grep -qF " ${PLATFORM_DATA_ROOT} " /etc/fstab 2> /dev/null; then
     printf '%s\n' "${DATA_FSTAB_LINE}" >> /etc/fstab
     info "Added noauto fstab entry for ${PLATFORM_DATA_ROOT}"
 fi
-# The bare mountpoint stays closed while the disk is locked, so nothing can
-# write into it and have those writes land on the OS disk.
+# Bare mountpoint closed while locked (the bare mountpoint invariant).
 install -d -o root -g root -m 0500 "${PLATFORM_DATA_ROOT}"
+
+# --- Host drive mounts (HGFS) --------------------------------------------
+# Host drives shared by the .vmx, mounted on demand under /mnt/<letter>.
+# An absent share (X: unplugged, S: BitLocker-locked, no shares configured)
+# just errors and retries on the next access; idle mounts release after 300s.
+# C and S are ro here and host-side both. Design: capability.host-data-access.md.
+log "Configure host drive mountpoints"
+install -d -m 0755 /mnt/C /mnt/X /mnt/S
+if ! grep -qF " /mnt/C " /etc/fstab 2> /dev/null; then
+    {
+        printf '.host:/C /mnt/C fuse.vmhgfs-fuse ro,allow_other,noauto,x-systemd.automount,x-systemd.idle-timeout=300 0 0\n'
+        printf '.host:/X /mnt/X fuse.vmhgfs-fuse rw,allow_other,noauto,x-systemd.automount,x-systemd.idle-timeout=300 0 0\n'
+        printf '.host:/S /mnt/S fuse.vmhgfs-fuse ro,allow_other,noauto,x-systemd.automount,x-systemd.idle-timeout=300 0 0\n'
+    } >> /etc/fstab
+    info "Added HGFS automount fstab entries for /mnt/C /mnt/X /mnt/S"
+fi
 
 # --- MOTD banner (derived from the hostname) ---------------------------------
 log "Write MOTD banner"
@@ -271,8 +321,7 @@ rm -f /etc/update-motd.d/10-help-text /etc/update-motd.d/60-unminimize
 printf '#!/bin/bash\nfiglet -k "%s" && figlet -k "%s"\n' \
     "${INSTANCE_ENV}" "${HOST_ID}" > /etc/update-motd.d/99-banner
 chmod 0755 /etc/update-motd.d/99-banner
-# With manual unlock, "is the data disk up right now?" is the first thing an
-# operator wants to know at login.
+# "Is the data disk up right now?" is the first thing to know at login.
 printf '#!/bin/bash\n/usr/local/bin/data-disk status --brief\n' \
     > /etc/update-motd.d/98-data-disk
 chmod 0755 /etc/update-motd.d/98-data-disk
@@ -283,11 +332,15 @@ install -m 0644 "${VM_INIT_DIR}/build-info.env" /etc/image-build-info.env
 install -m 0755 "${VM_INIT_DIR}/image-build-info" /usr/local/bin/image-build-info
 printf 'INSTALL_TIMESTAMP=%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" \
     >> /etc/image-build-info.env
+# --payload-package records what came from extra_deb rather than
+# packages.list, so the manifest can answer "which Syncthing is on this VM".
 python3 "${VM_INIT_DIR}/make-manifest.py" apply \
     --planned "${VM_INIT_DIR}/build-manifest.json" \
     --out /etc/image-build-manifest.json \
     --packages "${PACKAGES_LIST}" \
-    --platform-namespace "${PLATFORM_NAMESPACE}"
+    --platform-namespace "${PLATFORM_NAMESPACE}" \
+    --payload-package syncthing \
+    --payload-package ca-certificates-qfree
 
 # --- First-boot unit ---------------------------------------------------------
 log "Enable first-boot provisioning unit"

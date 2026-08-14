@@ -1,27 +1,11 @@
 #!/usr/bin/env python3
 
-# Control a VMware Workstation VM through vmrun.
-# Python port of invoke-vmrun.ps1.
+# Thin argparse front-end over vmrun for VM lifecycle actions.
 #
-# Pipeline position:
-#   1. 00.os-iso-build          -- build the per-host Ubuntu ISO
-#   2. create-vm-instance.py    -- write the .vmx and disks for the VM
-#   3. invoke-vmrun.py          -- start / control the VM  <-- this
+# Each vmrun action is a subcommand; _ACTION_VERBS below is the
+# subcommand-to-verb map.
 #
-# Each vmrun action is a subcommand. Subcommand names are kebab-case; they map
-# to the exact vmrun verbs below:
-#   list -> list            start -> start           stop -> stop
-#   reset -> reset          suspend -> suspend       pause -> pause
-#   unpause -> unpause      snapshot -> snapshot     delete-snapshot -> deleteSnapshot
-#   list-snapshots -> listSnapshots                  clone -> clone
-#   get-guest-ip -> getGuestIPAddress
-#
-# Usage:
-#   uv run python invoke-vmrun.py start --vmx S:\vms\xd00-lde-0010\xd00-lde-0010.vmx --start-mode nogui
-#   uv run python invoke-vmrun.py stop  --vmx ...\host.vmx --stop-mode soft
-#   uv run python invoke-vmrun.py snapshot --vmx ...\host.vmx --snapshot-name clean
-#   uv run python invoke-vmrun.py clone --vmx ...\host.vmx --clone-path S:\vms\clone.vmx --clone-type full
-#   uv run python invoke-vmrun.py list
+# Run with --help for the full flag surface.
 
 import argparse
 import atexit
@@ -59,23 +43,13 @@ _ACTION_VERBS = {
 # -- Script context ------------------------------------------------------
 
 def _script_context():
-    """The single-line script identity: '<name> v<version>'.
-
-    Single source of truth used for argument-parse errors/help, the pre-banner
-    startup guard, and the run banner, so a failure is always seen against the
-    same context regardless of where it happens.
-    """
+    """Script identity line: single source of context for errors, help, and the banner."""
     return f"{__script_name__} v{__version__}"
 
 
 class HeaderArgumentParser(argparse.ArgumentParser):
-    """ArgumentParser that prefixes usage, help, and errors with the script
-    context line, and shows the full help (not just the terse usage line) on
-    every parse failure.
-
-    Propagates to subparsers automatically: add_subparsers() defaults its
-    parser_class to type(self), so subcommand parsers inherit this behaviour.
-    """
+    """Parser that prefixes the script identity header to help and errors, so
+    parse failures carry script identity; subparsers inherit via parser_class."""
 
     def _header(self):
         return _script_context() + "\n"
@@ -120,14 +94,20 @@ class _Tee:
 
 
 def fmt_time(seconds):
+    """Format a duration with adaptive units. Keep identical to the copy in
+    create-vm-instance.py."""
     if seconds is None:
         return "-"
     if seconds < 1:
         return f"{seconds * 1000:.0f}ms"
     if seconds < 60:
         return f"{seconds:.1f}s"
-    m, s = divmod(int(seconds), 60)
-    return f"{m}m{s:02d}s"
+    if seconds < 3600:
+        m, s = divmod(int(seconds), 60)
+        return f"{m}m{s:02d}s"
+    h, rem = divmod(int(seconds), 3600)
+    m = rem // 60
+    return f"{h}h{m:02d}m"
 
 
 def redact_arguments(args):
@@ -197,10 +177,7 @@ def parse_arguments():
 
 
 def build_vmrun_arguments(args, resolved_vmx):
-    """Assemble the vmrun argument list for the chosen action.
-
-    Always prefixed with '-T ws', matching the PowerShell version.
-    """
+    """Assemble the vmrun argument list; always prefixed with '-T ws'."""
     verb = _ACTION_VERBS[args.command]
     arguments = ["-T", "ws"]
 
@@ -228,10 +205,8 @@ def build_vmrun_arguments(args, resolved_vmx):
 def _bootstrap_setup(args, script_start_timestamp):
     """Set up logging.
 
-    Everything here runs BEFORE the banner (the first normal output). A failure
-    -- resolving the .vmx path, an unwritable log dir -- would otherwise
-    surface as a bare traceback with no script identity. main() wraps the
-    single call so such failures are still prefixed with the script context.
+    Runs before logging or the banner exists, so failures here land in the
+    pre-banner window that main() catches and maps to exit 2.
 
     Returns (vmx_value, log_path).
     """
@@ -252,13 +227,8 @@ def _bootstrap_setup(args, script_start_timestamp):
 def main():
     args = parse_arguments()
 
-    # Capture startup timestamp
     script_start_timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    # Guard the pre-banner window. Until _bootstrap_setup() prints the context
-    # banner, a failure has no script identity on screen, so emit the context
-    # line and the error here. Catches EVERY exception type, so no pre-banner
-    # path can fail without context.
     try:
         vmx_value, log_path = _bootstrap_setup(args, script_start_timestamp)
     except Exception as exc:
@@ -266,10 +236,8 @@ def main():
         sys.stderr.write(f"{__script_name__}: error: {exc}\n")
         return 2
 
-    # Redact sensitive values before logging.
     redacted_args = redact_arguments(args)
 
-    # -- Standard run banner (printed before the action runs) --
     print(f"# {_script_context()}")
     print(f"# Started:  {script_start_timestamp}")
     print(f"# Log:      {log_path}")

@@ -1,0 +1,569 @@
+#!/usr/bin/env python3
+# =============================================================================
+# sync-node - operator lifecycle for the Syncthing replica on the platform data
+# disk. Sibling of data-disk: that one owns the disk, this one the replication.
+#
+#   identity / id / render / ensure / marker / status / gui
+#
+# Identity, config and index database live on the encrypted disk; the ISO
+# carries only the template. Three rules carry the safety of the design:
+#   1. The folder marker is absent exactly while the disk is locked, and is
+#      never created here as a side effect - only deliberately, by `marker
+#      --create` (plus --force on an empty share).
+#   2. Folder versioning stays configured. It is the recovery net.
+#   3. The share directory is data-disk's to create, never this command's.
+# Rationale: capability.data-synchronisation.md. Nothing here runs from the
+# systemd unit; every command is an operator action on an unlocked disk.
+# Platform identity comes from /etc/platform.env via platform_node.py, both
+# written/installed by guest-install.sh.
+# =============================================================================
+
+import os
+import secrets
+import socket
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+
+import platform_node as pn
+
+try:
+    _ENV = pn.load_platform_env()
+except pn.PlatformEnvError:
+    print(f"FATAL: {pn.PLATFORM_ENV_PATH} missing or unreadable", file=sys.stderr)
+    sys.exit(1)
+_D = pn.derived(_ENV)
+
+DATA_MOUNT = _D["data_root"]
+SHARE_DIR = _D["share"]
+STATE_DIR = _D["state_dir"]
+SYNC_USER = _D["sync_user"]
+PLATFORM_GROUP = _D["core_user"]
+NAMED_USER = _D["named_user"]
+NAMESPACE = _D["namespace"]
+
+SYNC_HOME = f"{STATE_DIR}/syncthing"
+SYNC_CONFIG = f"{SYNC_HOME}/config.xml"
+SYNC_KEY = f"{SYNC_HOME}/key.pem"
+SYNC_CERT = f"{SYNC_HOME}/cert.pem"
+SYNC_TEMPLATE = pn.SYNC_TEMPLATE_PATH
+SYNC_SERVICE = f"syncthing@{SYNC_USER}.service"
+SYNCTHING = "/usr/bin/syncthing"
+
+GUI_ADDR = "127.0.0.1:8384"
+# Workstation end of the SSH tunnel. Not 8384: every laptop runs its own
+# Syncthing there.
+GUI_TUNNEL_PORT = "18384"
+
+QUIET = False
+FORCE = False
+MARKER_CREATE = False
+
+
+def log(message):
+    if not QUIET:
+        print(f"==> {message}")
+
+
+def info(message):
+    if not QUIET:
+        print(f"    {message}")
+
+
+def warn(message):
+    print(f"    WARNING: {message}", file=sys.stderr)
+
+
+def die(message):
+    print(f"ERROR: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def usage(stream=None):
+    stream = stream if stream is not None else sys.stdout
+    print(f"""sync-node - Syncthing lifecycle for the platform share (namespace {NAMESPACE})
+
+Usage: sync-node <command> [--force] [--quiet]
+
+Commands:
+  identity  Create the device key and certificate on the encrypted disk. One
+            time per node. Refuses to replace an existing identity unless
+            --force, because replacing it makes this node a stranger to the hub.
+  id        Print this node's device ID, to paste into the hub. Needs root in
+            practice: the identity sits behind 0700 on the encrypted disk.
+  render    Write {SYNC_CONFIG}
+            from the template. Refuses to overwrite, because Syncthing owns that
+            file once it is running. --force replaces it.
+            The template holds two kinds of placeholder. AUTOFILL_ values are
+            filled here, per node. MANUALLY_FIX_ values are filled by a person in
+            the repository copy, and render refuses while any survives.
+  ensure    identity and render, each only if absent. Quiet and idempotent, and
+            the shortest path from a fresh unlock to a startable node once the
+            hub values are in the template.
+  marker    Report the marker name the daemon is really using, and whether the
+            marker exists. With --create, create it; on an empty share that also
+            needs --force, because it is how a locked disk becomes a mass delete.
+  status    Report the current state. Runs without root, but the identity, the
+            config and the daemon readback all live behind 0700 on the
+            encrypted disk and are reported as "not readable" rather than
+            guessed. For the full picture: sudo sync-node status.
+  gui       Print the SSH tunnel that reaches the web interface.
+
+The disk must be unlocked first: sudo data-disk unlock""", file=stream)
+
+
+def run(cmd, **kwargs):
+    """subprocess.run with sane defaults; never raises on exit code."""
+    kwargs.setdefault("check", False)
+    return subprocess.run(cmd, **kwargs)
+
+
+def capture(cmd):
+    """Command stdout as stripped text, '' on any failure (the bash
+    `2>/dev/null || true` idiom)."""
+    try:
+        result = run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                     encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return (result.stdout or "").strip()
+
+
+def run_or_exit(cmd, **kwargs):
+    """Run a command whose failure should abort like `set -e`: the tool's own
+    stderr has already reached the terminal."""
+    result = run(cmd, **kwargs)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+    return result
+
+
+def current_user():
+    # pwd only exists on the guest; imported here so the file loads on the
+    # Windows dev host for tests.
+    import pwd
+    return pwd.getpwuid(os.geteuid()).pw_name
+
+
+def require_root(command):
+    if os.geteuid() != 0:
+        die(f"{command} needs root. Try: sudo sync-node {command}")
+
+
+def is_mounted():
+    return run(["findmnt", "-rn", "--mountpoint", DATA_MOUNT],
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def require_mount():
+    if not is_mounted():
+        die(f"{DATA_MOUNT} is not mounted. Run 'sudo data-disk unlock' first.")
+
+
+def ensure_node_state():
+    # Only the node's own state; the share directory is data-disk's (rule 3).
+    run_or_exit(["install", "-d", "-o", "root", "-g", PLATFORM_GROUP,
+                 "-m", "0750", STATE_DIR])
+    run_or_exit(["install", "-d", "-o", SYNC_USER, "-g", PLATFORM_GROUP,
+                 "-m", "0700", SYNC_HOME])
+
+
+def non_empty_file(path):
+    try:
+        return os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def have_identity():
+    return non_empty_file(SYNC_KEY) and non_empty_file(SYNC_CERT)
+
+
+def have_config():
+    return non_empty_file(SYNC_CONFIG)
+
+
+# SYNC_HOME is 0700 stsync (and absent while locked), so an unprivileged caller
+# cannot tell "no identity yet" from "not allowed to look" - opposite remedies,
+# one of which is "generate a new identity". Never guess.
+def state_readable():
+    return os.geteuid() == 0
+
+
+def device_id():
+    return capture(["runuser", "-u", SYNC_USER, "--", SYNCTHING,
+                    "device-id", f"--home={SYNC_HOME}"])
+
+
+def folder_id():
+    return pn.folder_id(SYNC_CONFIG, SYNC_TEMPLATE)
+
+
+def marker_name_configured():
+    return pn.marker_name_configured(SYNC_CONFIG, SYNC_TEMPLATE)
+
+
+# What the daemon is really using; None if it is not running. This is the only
+# answer worth trusting, and asking for it costs one call.
+def marker_name_effective():
+    if not (os.access(SYNCTHING, os.X_OK) and have_config()):
+        return None
+    return capture([SYNCTHING, "cli", f"--home={SYNC_HOME}",
+                    "config", "folders", folder_id(), "marker-name", "get"]) or None
+
+
+def marker_name():
+    return marker_name_effective() or marker_name_configured()
+
+
+def marker_path():
+    return f"{SHARE_DIR}/{marker_name()}"
+
+
+def identity_report():
+    if not state_readable():
+        return f"not readable as {current_user()} - run: sudo sync-node status"
+    if have_identity():
+        return f"present, {device_id()}"
+    return "absent - sudo sync-node identity"
+
+
+def config_report():
+    if not state_readable():
+        return f"not readable as {current_user()} - run: sudo sync-node status"
+    if have_config():
+        return SYNC_CONFIG
+    return "not rendered - sudo sync-node render"
+
+
+# -- identity ---------------------------------------------------------------
+
+def cmd_identity():
+    require_root("identity")
+    require_mount()
+    if not os.access(SYNCTHING, os.X_OK):
+        die(f"{SYNCTHING} is not installed")
+    ensure_node_state()
+
+    if have_identity() and not FORCE:
+        # Printing the ID here is a convenience: `identity` makes the keypair,
+        # `id` prints the ID. Only on a second run do the two look alike.
+        info("identity already present, nothing to do.")
+        info("Its device ID, which 'sync-node id' also prints:")
+        info(f"  {device_id()}")
+        return
+
+    log(f"Generate the device identity in {SYNC_HOME}")
+    # `generate` also writes a starter config.xml; drop it, `render` owns that
+    # file and would otherwise refuse. 2.x generate creates no default folder.
+    run_or_exit(["runuser", "-u", SYNC_USER, "--", SYNCTHING, "generate",
+                 f"--home={SYNC_HOME}", "--no-port-probing"],
+                stdout=subprocess.DEVNULL)
+    try:
+        os.unlink(SYNC_CONFIG)
+    except OSError:
+        pass
+    os.chmod(SYNC_KEY, 0o600)
+    if not have_identity():
+        die("identity generation produced no key")
+
+    log(f"Device ID {device_id()}")
+    info("That is the keypair, not the config. Admit this node on the hub, then:")
+    info("  sudo sync-node render")
+
+
+# -- id -----------------------------------------------------------------------
+
+def cmd_id():
+    require_mount()
+    if not have_identity():
+        die("no identity yet. Run 'sudo sync-node identity'.")
+    print(device_id())
+
+
+# -- render -------------------------------------------------------------------
+
+def cmd_render():
+    require_root("render")
+    require_mount()
+    if not os.access(SYNC_TEMPLATE, os.R_OK):
+        die(f"no template at {SYNC_TEMPLATE}")
+    if not have_identity():
+        die("no identity yet. Run 'sudo sync-node identity'.")
+    ensure_node_state()
+
+    if have_config() and not FORCE:
+        die(f"{SYNC_CONFIG} already exists. Syncthing owns it once it has run, and\n"
+            "       re-rendering discards anything changed through the GUI or the API. Run\n"
+            "       'sync-node render --force' to replace it deliberately.")
+
+    self_id = device_id()
+    if not self_id:
+        die("could not read the device ID")
+    api_key = secrets.token_hex(16)
+
+    log(f"Render {SYNC_CONFIG}")
+    with open(SYNC_TEMPLATE, encoding="utf-8") as handle:
+        text = handle.read()
+
+    # AUTOFILL_*: per-node values that cannot exist in a repository, filled here.
+    for token, value in {
+        "AUTOFILL_DEVICE_ID_SELF": self_id,
+        "AUTOFILL_DEVICE_NAME": socket.gethostname(),
+        "AUTOFILL_API_KEY": api_key,
+    }.items():
+        text = text.replace(token, value)
+
+    # A surviving AUTOFILL_ token means template and sync-node shipped out of
+    # step: a build problem, nothing to fix on the node.
+    stray = pn.pending_tokens(text, "AUTOFILL_")
+    if stray:
+        die("the template asks for AUTOFILL values this sync-node does not know:\n"
+            f"       {', '.join(stray)}\n"
+            "       sync-node and the template ship together and are out of step. Fix the\n"
+            "       build, not this node.")
+
+    # A surviving MANUALLY_FIX_ token would fail as a quiet absence of peers,
+    # so refuse to write anything at all.
+    manual = pn.pending_tokens(text, "MANUALLY_FIX_")
+    if manual:
+        die("the template still holds values that a person fills:\n"
+            f"       {', '.join(manual)}\n"
+            f"       Edit {SYNC_TEMPLATE}\n"
+            "       These are the same on every guest, so make the same edit in the repository\n"
+            "       copy under 00.host-config/common/payload/extra_cfg/syncthing/, or the next\n"
+            "       image ships with the same gap.")
+
+    # Parse before writing: a malformed config would make Syncthing start from
+    # a generated default (new identity, no folder, global discovery on).
+    try:
+        ET.fromstring(text)
+    except ET.ParseError as exc:
+        die(f"the rendered config is not well-formed XML: {exc}")
+
+    new_path = f"{SYNC_CONFIG}.new"
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    os.replace(new_path, SYNC_CONFIG)
+    run_or_exit(["chown", f"{SYNC_USER}:{PLATFORM_GROUP}", SYNC_CONFIG])
+    os.chmod(SYNC_CONFIG, 0o600)
+    info(f"device {self_id}")
+    info(f"folder {SHARE_DIR}, GUI {GUI_ADDR}, API key held in the config")
+    if not os.path.isdir(SHARE_DIR):
+        warn(f"{SHARE_DIR} does not exist. data-disk creates it at init and\n"
+             "       asserts it at unlock. Until it does, the folder is refused, which is the\n"
+             "       correct outcome and not a fault of this command.")
+    # "The service was skipped and now it will run" is not visible anywhere
+    # else, so say it here.
+    info(f"The config now exists, so {SYNC_SERVICE} will start rather than skip:")
+    info(f"  sudo systemctl start {SYNC_SERVICE}")
+
+
+# -- ensure ---------------------------------------------------------------------
+
+def cmd_ensure():
+    require_root("ensure")
+    require_mount()
+    if not have_identity():
+        cmd_identity()
+    if not have_config():
+        cmd_render()
+
+
+# -- status -----------------------------------------------------------------
+
+def _row(label, value):
+    print(f"  {label:<12} {value}")
+
+
+def cmd_status():
+    mounted = "yes" if is_mounted() else "no"
+    version = "not installed"
+    if os.access(SYNCTHING, os.X_OK):
+        raw = capture([SYNCTHING, "--version"])
+        for line in raw.splitlines():
+            if line.strip():
+                version = line.strip()
+                break
+
+    _row("namespace", NAMESPACE)
+    _row("data root", f"{DATA_MOUNT} (mounted: {mounted})")
+    _row("share", f"{SHARE_DIR} "
+         + ("(present)" if os.path.isdir(SHARE_DIR) else "(absent)"))
+    _row("syncthing", version)
+    # Before the config line: an unfinished template is the cause, "not
+    # rendered" only the symptom.
+    if os.access(SYNC_TEMPLATE, os.R_OK):
+        _, pending = pn.scan_template(SYNC_TEMPLATE)
+        if pending:
+            _row("template", f"{len(pending)} values still to fix by hand:")
+            print(f"  {'':<12}   {', '.join(pending)}")
+        else:
+            _row("template", f"{SYNC_TEMPLATE} (complete)")
+    else:
+        _row("template", f"{SYNC_TEMPLATE} absent")
+    _row("identity", identity_report())
+    _row("config", config_report())
+
+    svc_active = capture(["systemctl", "is-active", SYNC_SERVICE])
+    svc_enabled = capture(["systemctl", "is-enabled", SYNC_SERVICE])
+    svc_note = ""
+    # "inactive" with no config is the drop-in condition doing its job; say so.
+    if svc_active == "inactive" and state_readable() and not have_config():
+        svc_note = "  (skipped by the drop-in condition: no config yet)"
+    _row("service", f"{svc_active} / {svc_enabled}{svc_note}")
+
+    # Marker absent while mounted means empty share or removed marker; the
+    # folder is refused, which is what saves the peers.
+    configured = marker_name_configured()
+    effective = marker_name_effective()
+    if effective:
+        _row("marker name", f"{effective} (effective, from the daemon)")
+        if effective != configured:
+            warn(f"the config says {configured} but the daemon uses {effective}.")
+            warn("markerName is a child element; as an attribute it is ignored.")
+    elif not state_readable():
+        # The template is 0644, so the configured name is readable; whether the
+        # daemon agrees is what needs root.
+        _row("marker name",
+             f"{configured} (from the config; the daemon cannot be asked as {current_user()})")
+    else:
+        _row("marker name", f"{configured} (from the config, daemon not answering)")
+    if mounted == "yes":
+        if os.path.exists(marker_path()):
+            _row("marker", f"present in {SHARE_DIR}")
+        else:
+            _row("marker",
+                 "ABSENT - the folder will be refused, which is correct on a bare mountpoint")
+
+    if have_config() and os.access(SYNCTHING, os.X_OK):
+        # An empty answer means the daemon is down; counting matches in it
+        # would misreport "0 connected".
+        peers = capture([SYNCTHING, "cli", f"--home={SYNC_HOME}",
+                         "show", "connections"])
+        if peers:
+            connected = peers.count('"connected": true')
+            _row("peers", f"{connected} connected")
+        else:
+            _row("peers", f"API not answering on {GUI_ADDR}")
+
+
+# -- marker -------------------------------------------------------------------
+
+# Creating the marker on an empty directory tells every peer the share is
+# empty, so: mount checked, share must exist, an empty share needs --force.
+def cmd_marker():
+    require_mount()
+    name = marker_name()
+    effective = marker_name_effective()
+    path = f"{SHARE_DIR}/{name}"
+
+    if effective:
+        info(f"marker name {effective}, read back from the running daemon")
+    else:
+        info(f"marker name {name}, read from the config (the daemon is not answering,")
+        info("so this is what the file says, not what is in force)")
+
+    if os.path.exists(path):
+        info(f"marker present: {path}")
+        return
+
+    if not MARKER_CREATE:
+        info(f"marker absent: {path}")
+        info("The folder stays refused until it exists. Create it only once, on a")
+        info("correctly mounted disk: sudo sync-node marker --create")
+        return
+
+    require_root("marker")
+    if not os.path.isdir(SHARE_DIR):
+        die(f"{SHARE_DIR} does not exist. data-disk owns it:\n"
+            "       'sudo data-disk unlock' asserts it, 'sudo data-disk init' creates it on a\n"
+            "       new disk. Creating it here would be creating an empty share.")
+
+    entries = len(os.listdir(SHARE_DIR))
+    if entries == 0 and not FORCE:
+        die(f"{SHARE_DIR} is empty. Creating the marker now would tell every peer that\n"
+            "       the share was emptied, and they would delete their copies. Do this only on\n"
+            "       the very first node of a new share, with 'sync-node marker --create --force'.")
+    run_or_exit(["install", "-d", "-o", SYNC_USER, "-g", PLATFORM_GROUP,
+                 "-m", "2770", path])
+    log(f"Marker created: {path}")
+    info("A folder already in error does not recover on its own. Trigger a rescan")
+    info(f"or restart {SYNC_SERVICE}.")
+
+
+# -- gui ------------------------------------------------------------------------
+
+def cmd_gui():
+    api_key = None
+    if have_config():
+        api_key = pn.first_element_text(SYNC_CONFIG, ".//apikey")
+    # The address the workstation dials: the Windows host usually cannot
+    # resolve the guest's host name.
+    addr = capture(["hostname", "-I"]).split()
+    addr = addr[0] if addr else socket.gethostname()
+
+    log(f"The web interface listens on {GUI_ADDR} only, never on the network.")
+    info("Forward it over SSH from your workstation:")
+    info("")
+    info(f"  ssh -N -L {GUI_TUNNEL_PORT}:{GUI_ADDR} {NAMED_USER}@{addr}")
+    info("")
+    info(f"Leave that running, then open http://127.0.0.1:{GUI_TUNNEL_PORT}")
+    info("")
+    info(f"The local port is {GUI_TUNNEL_PORT} and not 8384 because the laptop runs its")
+    info("own Syncthing on 8384. Reusing it either fails to bind or shows you the")
+    info("laptop's node while you read it as this one.")
+    info("Browse to 127.0.0.1 or localhost. Syncthing checks the Host header and")
+    info("answers 403 to a host name, whatever port the tunnel uses.")
+    info("")
+    info("There is no login prompt. No GUI user or password is set, so anyone who")
+    info("reaches the loopback port holds this node's sync config. The tunnel is")
+    info("the access control.")
+    if api_key:
+        info("")
+        info(f"API key: {api_key}")
+        info("For callers, in an X-API-Key header. The browser never uses it, and")
+        info("?apikey= is refused. On this guest you rarely need it by hand:")
+        info(f"  syncthing cli --home={SYNC_HOME} show connections")
+
+
+# -- Dispatch -------------------------------------------------------------------
+
+def main(argv):
+    global QUIET, FORCE, MARKER_CREATE
+
+    command = argv[0] if argv else ""
+    for option in argv[1:]:
+        if option == "--force":
+            FORCE = True
+        elif option == "--quiet":
+            QUIET = True
+        elif option == "--create":
+            MARKER_CREATE = True
+        elif option in ("-h", "--help"):
+            usage()
+            return 0
+        else:
+            die(f"Unknown option: {option}")
+
+    commands = {
+        "identity": cmd_identity,
+        "id": cmd_id,
+        "render": cmd_render,
+        "ensure": cmd_ensure,
+        "marker": cmd_marker,
+        "status": cmd_status,
+        "gui": cmd_gui,
+    }
+    if command in ("", "-h", "--help", "help"):
+        usage()
+        return 0
+    if command not in commands:
+        usage(sys.stderr)
+        die(f"Unknown command: {command}")
+    commands[command]()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
