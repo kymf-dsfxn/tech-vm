@@ -55,7 +55,7 @@ _SETTINGS = [
     ("EnableSecureBoot", "enable_secure_boot", "bool", False, False),
     ("DisableSideChannelMitigations", "disable_side_channel_mitigations", "bool", False, False),
     ("DataDiskSourcePath", "data_disk_source_path", "str", None, False),
-    ("HostSharedDrives", "host_shared_drives", "str", "C:ro,X:rw,S:ro", False),
+    ("HostSharedDrives", "host_shared_drives", "str", "C:rw,X:rw,S:rw", False),
 ]
 
 _RANGES = {

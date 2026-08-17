@@ -26,5 +26,5 @@
   "VdiskManagerPath": null,
   "EnableSecureBoot": false,
   "DisableSideChannelMitigations": true,
-  "HostSharedDrives": "C:ro,X:rw,S:ro"
+  "HostSharedDrives": "C:rw,X:rw,S:rw"
 }

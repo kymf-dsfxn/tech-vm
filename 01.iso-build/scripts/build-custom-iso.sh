@@ -70,6 +70,7 @@ COMMON_ASSETS=(
   "provision/guest-firstboot.sh"
   "guest-bin/data-disk"
   "guest-bin/sync-node"
+  "guest-bin/host-drives"
   "guest-bin/platform_node.py"
   "provision/make-manifest.py"
   "provision/vm-init-firstboot.service"

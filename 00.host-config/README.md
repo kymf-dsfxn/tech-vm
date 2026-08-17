@@ -26,6 +26,7 @@ common/
     data-disk                  Encrypted data disk: init/unlock/lock/status.
     sync-node                  Syncthing replica on that disk: identity/id/
                                render/ensure/marker/status/gui.
+    host-drives                HGFS host drive mounts: status/mount/reset.
     platform_node.py           Shared library: platform.env, the six-state
                                classifier, marker/template resolution.
     image-build-info           Prints identity, timestamp, and with
@@ -141,8 +142,9 @@ the repo root, and the rationale lives there:
   placeholder namespaces, and the GUI/API access model are all there.
 - **`../capability.host-data-access.md`** - the guest reads the host drives
   over HGFS at `/mnt/C`, `/mnt/X`, `/mnt/S` (automounted on access, tolerant
-  of absence; `guest-install.sh` writes the fstab block). The host reads the
-  guest share over SMB, covered by the datadisk document.
+  of absence; `guest-install.sh` writes the fstab block, and `host-drives`
+  reports why a share is not there). The host reads the guest share over SMB,
+  covered by the datadisk document.
 
 On a new guest the first `data-disk unlock` starts nothing, and says so. That
 is the node reporting that it is not set up yet, not a fault.

@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+# =============================================================================
+# host-drives - operator view of the HGFS host drive mounts.
+#
+#   status / mount / reset
+#
+# The mounts are automounts: nothing is mounted at boot and the first access
+# triggers the mount, so "empty directory" is the symptom of every failure -
+# a share the host is not offering, a share enabled in the GUI since boot, and
+# a mount unit systemd has stopped retrying all look identical from the shell.
+# This command tells them apart and names the remedy. Design:
+# capability.host-data-access.md.
+#
+# The drive list is read from /etc/fstab rather than hardcoded, so it follows
+# whatever HostSharedDrives the VM was built with.
+# =============================================================================
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+FSTAB_PATH = "/etc/fstab"
+HGFS_FSTYPE = "fuse.vmhgfs-fuse"
+HGFS_SPEC_PREFIX = ".host:/"
+
+BRIEF = False
+
+
+def log(message):
+    print(f"==> {message}")
+
+
+def info(message):
+    print(f"    {message}")
+
+
+def warn(message):
+    print(f"    WARNING: {message}", file=sys.stderr)
+
+
+def die(message):
+    print(f"ERROR: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def usage(stream=None):
+    stream = stream if stream is not None else sys.stdout
+    print("""host-drives - HGFS host drive mounts
+
+Usage: host-drives <command> [<drive>...]
+
+Commands:
+  status    Report each drive: whether the host is offering the share, whether
+            it is mounted, and whether the automount is still armed. Runs
+            without root. --brief prints a single line.
+  mount     Mount now rather than waiting for the first access. Clears a
+            failed unit first, so this is also the recovery command after the
+            share is enabled host-side. Needs root.
+  reset     Clear failed mount units and re-arm the automounts, without
+            mounting. Needs root.
+
+<drive> narrows to named drives (letters or share names); the default is all.
+
+The mounts are on-demand: an absent share errors and retries on the next
+access, so an unplugged X: is normal rather than a fault.""", file=stream)
+
+
+def run(cmd, **kwargs):
+    kwargs.setdefault("check", False)
+    return subprocess.run(cmd, **kwargs)
+
+
+def capture(cmd):
+    """Command stdout as stripped text, '' on any failure."""
+    try:
+        result = run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                     encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return (result.stdout or "").strip()
+
+
+def require_root(command):
+    if os.geteuid() != 0:
+        die(f"{command} needs root. Try: sudo host-drives {command}")
+
+
+# -- The configured drives -------------------------------------------------
+
+def _unescape(field):
+    """fstab and mountinfo octal-escape spaces and tabs in paths."""
+    return re.sub(r"\\0([0-7][0-7])", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def configured_drives():
+    """The HGFS entries in fstab, in file order: [{share, path, options}]."""
+    drives = []
+    try:
+        with open(FSTAB_PATH, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                fields = line.split()
+                if len(fields) < 4 or fields[2] != HGFS_FSTYPE:
+                    continue
+                if not fields[0].startswith(HGFS_SPEC_PREFIX):
+                    continue
+                drives.append({
+                    "share": fields[0][len(HGFS_SPEC_PREFIX):],
+                    "path": _unescape(fields[1]),
+                    "options": fields[3],
+                })
+    except OSError:
+        pass
+    return drives
+
+
+def select_drives(names):
+    """All configured drives, or those the operator named. An unknown name is
+    an error rather than a silent empty selection."""
+    drives = configured_drives()
+    if not names:
+        return drives
+    wanted = {name.strip("/").upper() for name in names}
+    chosen = [d for d in drives if d["share"].upper() in wanted]
+    found = {d["share"].upper() for d in chosen}
+    for name in sorted(wanted - found):
+        die(f"No HGFS entry in {FSTAB_PATH} for {name}. "
+            f"Configured: {', '.join(d['share'] for d in drives) or '(none)'}")
+    return chosen
+
+
+# -- Host side -------------------------------------------------------------
+
+def host_shares():
+    """Share names the host is currently offering, or None if that cannot be
+    asked. None and [] mean different things and must not be conflated: the
+    first is a missing tool, the second is a host offering nothing."""
+    if shutil.which("vmware-hgfsclient") is None:
+        return None
+    try:
+        result = run(["vmware-hgfsclient"], stdout=subprocess.PIPE,
+                     stderr=subprocess.DEVNULL, encoding="utf-8",
+                     errors="replace")
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return [line.strip() for line in (result.stdout or "").splitlines()
+            if line.strip()]
+
+
+# -- systemd side ----------------------------------------------------------
+
+def unit_names(path):
+    """The (mount, automount) unit names systemd derives from a mountpoint."""
+    escaped = capture(["systemd-escape", "--path", path])
+    if not escaped:
+        # systemd-escape absent: the same transform, done here.
+        escaped = path.strip("/").replace("-", "\\x2d").replace("/", "-")
+    return f"{escaped}.mount", f"{escaped}.automount"
+
+
+def unit_props(unit, properties):
+    """systemctl show as a dict; missing values come back as ''."""
+    output = capture(["systemctl", "show", unit,
+                      "--property=" + ",".join(properties)])
+    values = {name: "" for name in properties}
+    for line in output.splitlines():
+        name, _, value = line.partition("=")
+        if name in values:
+            values[name] = value
+    return values
+
+
+def mounted_options(path):
+    """The live mount options at a path, or None if nothing is mounted there."""
+    try:
+        with open("/proc/self/mounts", encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.split()
+                if len(fields) >= 4 and _unescape(fields[1]) == path:
+                    return fields[3]
+    except OSError:
+        pass
+    return None
+
+
+def drive_state(drive, shares):
+    """Everything worth knowing about one drive, as a dict. Kept separate from
+    the printing so status and the brief line agree by construction."""
+    mount_unit, automount_unit = unit_names(drive["path"])
+    mount = unit_props(mount_unit, ["ActiveState", "Result"])
+    automount = unit_props(automount_unit, ["ActiveState"])
+    options = mounted_options(drive["path"])
+
+    return {
+        "share": drive["share"],
+        "path": drive["path"],
+        "mount_unit": mount_unit,
+        "automount_unit": automount_unit,
+        "mount_state": mount["ActiveState"],
+        "mount_result": mount["Result"],
+        "automount_state": automount["ActiveState"],
+        "options": options,
+        "mounted": options is not None,
+        # None = could not ask the host at all.
+        "offered": None if shares is None else drive["share"] in shares,
+        # The failure that survives a retry: systemd has hit the unit's start
+        # limit and stops triggering the mount until the unit is reset.
+        "rate_limited": (mount["ActiveState"] == "failed"
+                         and mount["Result"] == "start-limit-hit"),
+        "armed": automount["ActiveState"] == "active",
+    }
+
+
+def remedy(state):
+    """The one thing to do about this drive, or '' if there is nothing to do.
+    Ordered by what blocks what: a blocked unit hides a missing share."""
+    if state["rate_limited"]:
+        return (f"retries blocked by the systemd start limit - "
+                f"sudo host-drives reset {state['share']}")
+    if state["mount_state"] == "failed":
+        return (f"mount failed - systemctl status {state['mount_unit']}")
+    if not state["armed"] and not state["mounted"]:
+        return (f"automount not armed - sudo systemctl start "
+                f"{state['automount_unit']}")
+    if state["offered"] is False:
+        return ("not offered by the host - enable it in VM > Settings > "
+                "Options > Shared Folders, then: sudo host-drives mount "
+                f"{state['share']}")
+    if state["offered"] is None:
+        return "cannot ask the host - is open-vm-tools installed?"
+    return ""
+
+
+# -- status ----------------------------------------------------------------
+
+def _row(label, value):
+    print(f"  {label:<10} {value}")
+
+
+def _host_word(state):
+    if state["offered"] is None:
+        return "unknown"
+    return "offered" if state["offered"] else "not offered"
+
+
+def _mount_word(state):
+    if state["mounted"]:
+        access = "rw" if re.search(r"(^|,)rw(,|$)", state["options"] or "") else "ro"
+        return f"mounted {access}"
+    if state["rate_limited"]:
+        return "not mounted (retries blocked)"
+    if state["mount_state"] == "failed":
+        return "not mounted (last attempt failed)"
+    if state["armed"]:
+        return "not mounted (mounts on access)"
+    return "not mounted"
+
+
+def cmd_status(names):
+    drives = select_drives(names)
+    shares = host_shares()
+    states = [drive_state(drive, shares) for drive in drives]
+
+    if BRIEF:
+        print(_brief_line(states, shares))
+        return 0
+
+    if not drives:
+        info(f"No HGFS entries in {FSTAB_PATH}. This VM was built with host "
+             f"drive sharing off.")
+        return 0
+
+    for state in states:
+        print(f"  {state['path']}  (share {state['share']})")
+        _row("host", _host_word(state))
+        _row("mount", _mount_word(state))
+        _row("automount", state["automount_state"] or "(no unit)")
+        if state["mounted"]:
+            _row("options", state["options"])
+        fix = remedy(state)
+        if fix:
+            _row("action", fix)
+        print()
+
+    if shares is not None:
+        # Against every configured drive, not the selection: narrowing to one
+        # drive must not report the others as unconfigured.
+        known = {d["share"] for d in configured_drives()}
+        unconfigured = [name for name in shares if name not in known]
+        if unconfigured:
+            info(f"Host also offers {', '.join(unconfigured)}, which this VM "
+                 f"has no {FSTAB_PATH} entry for.")
+    return 0
+
+
+def _brief_line(states, shares):
+    """One line for the MOTD: the problem if there is one, else the count."""
+    if not states:
+        return "host drives: none configured"
+    if shares is None:
+        return "host drives: cannot ask the host - is open-vm-tools installed?"
+
+    blocked = [s["share"] for s in states if s["rate_limited"]
+               or s["mount_state"] == "failed"]
+    if blocked:
+        return (f"host drives: {', '.join(blocked)} stuck - "
+                f"sudo host-drives reset")
+
+    missing = [s["share"] for s in states if s["offered"] is False]
+    available = len(states) - len(missing)
+    if missing:
+        return (f"host drives: {available}/{len(states)} available "
+                f"({', '.join(missing)} not offered by the host)")
+    return f"host drives: {len(states)}/{len(states)} available"
+
+
+# -- mount / reset ---------------------------------------------------------
+
+def _reset_units(state):
+    """Clear a failed unit and re-arm the automount. reset-failed on a healthy
+    unit is a no-op, so this is safe to run unconditionally."""
+    run(["systemctl", "reset-failed", state["mount_unit"],
+         state["automount_unit"]], stderr=subprocess.DEVNULL)
+    if not state["armed"]:
+        run(["systemctl", "start", state["automount_unit"]],
+            stderr=subprocess.DEVNULL)
+
+
+def cmd_reset(names):
+    require_root("reset")
+    drives = select_drives(names)
+    shares = host_shares()
+    for drive in drives:
+        state = drive_state(drive, shares)
+        log(f"Reset {state['path']}")
+        _reset_units(state)
+        after = drive_state(drive, shares)
+        info(f"automount {after['automount_state'] or '(no unit)'}, "
+             f"mount {after['mount_state'] or '(no unit)'}")
+    return 0
+
+
+def cmd_mount(names):
+    require_root("mount")
+    drives = select_drives(names)
+    shares = host_shares()
+
+    failures = 0
+    for drive in drives:
+        state = drive_state(drive, shares)
+        if state["mounted"]:
+            info(f"{state['path']} already mounted")
+            continue
+
+        log(f"Mount {state['path']}")
+        # Unconditional, not conditional on the failed state: this is the
+        # command an operator reaches for after enabling the share in the GUI,
+        # and a start limit hit before that moment would otherwise make the
+        # mount fail for a reason that no longer exists.
+        _reset_units(state)
+        result = run(["systemctl", "start", state["mount_unit"]],
+                     stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
+        if result.returncode == 0 and mounted_options(state["path"]) is not None:
+            info(f"mounted {mounted_options(state['path'])}")
+            continue
+
+        failures += 1
+        for line in (result.stderr or "").splitlines():
+            warn(line)
+        fix = remedy(drive_state(drive, host_shares()))
+        warn(f"{state['path']} did not mount")
+        if fix:
+            info(fix)
+
+    return 1 if failures else 0
+
+
+# -- Dispatch --------------------------------------------------------------
+
+def main(argv):
+    global BRIEF
+
+    command = argv[0] if argv else ""
+    names = []
+    for option in argv[1:]:
+        if option == "--brief":
+            BRIEF = True
+        elif option in ("-h", "--help"):
+            usage()
+            return 0
+        elif option.startswith("-"):
+            die(f"Unknown option: {option}")
+        else:
+            names.append(option)
+
+    commands = {
+        "status": cmd_status,
+        "mount": cmd_mount,
+        "reset": cmd_reset,
+    }
+    if command in ("", "-h", "--help", "help"):
+        usage()
+        return 0
+    if command not in commands:
+        usage(sys.stderr)
+        die(f"Unknown command: {command}")
+    return commands[command](names)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

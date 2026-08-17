@@ -303,14 +303,17 @@ install -d -o root -g root -m 0500 "${PLATFORM_DATA_ROOT}"
 # Host drives shared by the .vmx, mounted on demand under /mnt/<letter>.
 # An absent share (X: unplugged, S: BitLocker-locked, no shares configured)
 # just errors and retries on the next access; idle mounts release after 300s.
-# C and S are ro here and host-side both. Design: capability.host-data-access.md.
+# All three are rw here and host-side both. Design: capability.host-data-access.md.
 log "Configure host drive mountpoints"
+# Every automount failure looks like an empty directory, so the operator gets
+# a command that distinguishes the causes and names the remedy.
+install -m 0755 "${VM_INIT_DIR}/host-drives" /usr/local/bin/host-drives
 install -d -m 0755 /mnt/C /mnt/X /mnt/S
 if ! grep -qF " /mnt/C " /etc/fstab 2> /dev/null; then
     {
-        printf '.host:/C /mnt/C fuse.vmhgfs-fuse ro,allow_other,noauto,x-systemd.automount,x-systemd.idle-timeout=300 0 0\n'
+        printf '.host:/C /mnt/C fuse.vmhgfs-fuse rw,allow_other,noauto,x-systemd.automount,x-systemd.idle-timeout=300 0 0\n'
         printf '.host:/X /mnt/X fuse.vmhgfs-fuse rw,allow_other,noauto,x-systemd.automount,x-systemd.idle-timeout=300 0 0\n'
-        printf '.host:/S /mnt/S fuse.vmhgfs-fuse ro,allow_other,noauto,x-systemd.automount,x-systemd.idle-timeout=300 0 0\n'
+        printf '.host:/S /mnt/S fuse.vmhgfs-fuse rw,allow_other,noauto,x-systemd.automount,x-systemd.idle-timeout=300 0 0\n'
     } >> /etc/fstab
     info "Added HGFS automount fstab entries for /mnt/C /mnt/X /mnt/S"
 fi

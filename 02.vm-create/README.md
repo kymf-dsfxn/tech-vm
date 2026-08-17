@@ -85,9 +85,9 @@ Get the guest IP with `invoke-vmrun.py get-guest-ip`; the default `nat` network
 is sufficient, because the host holds an address on the same vmnet segment.
 
 The guest reaches the host drives over HGFS at `/mnt/C`, `/mnt/X`, `/mnt/S`
-(C and S read-only, X read-write), automounted on access and tolerant of an
+(all three read-write), automounted on access and tolerant of an
 absent drive. `HostSharedDrives` configures the share list - a comma list of
-`<letter>[=<host-path>][:ro|:rw]`, default `C:ro,X:rw,S:ro`; an empty string
+`<letter>[=<host-path>][:ro|:rw]`, default `C:rw,X:rw,S:rw`; an empty string
 turns HGFS off. The `.vmx` then also carries `msg.autoAnswer = "TRUE"`, so a
 power-on with the external drive unplugged never blocks an unattended
 `vmrun start`.
