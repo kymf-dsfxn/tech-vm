@@ -36,13 +36,19 @@ common/
   tests/                       Unit tests for platform_node.py, plus the CLI
                                contract the commands honour. Repo-only, not
                                staged onto the ISO.
+    db-clients/                Integration test for the ASE/IQ/Postgres client
+                               toolchain: run.sh drives a container of the
+                               target release, runs the SAP stanzas straight
+                               out of guest-install.sh, and compiles the three
+                               smoke clients against the result.
   payload/                     Files that land in the guest, common to all
                                hosts, copied by the verbatim merge.
     extra_cfg/                 apt-minimal.conf, settings.xml, and so on.
       syncthing/               node-config.xml.template and the syncthing@
                                data-disk.conf drop-in.
     extra_deb/                 Company CA and Syncthing .debs.
-    extra_tgz/                 Maven and Liquibase tarballs.
+    extra_tgz/                 Maven, Liquibase, and the SAP ASE and SQL
+                               Anywhere client bundles.
     extra_keys/                Public keys (kymf.pub).
 <host>/
   autoinstall/user-data        Autoinstall control. Per-host network and identity.
@@ -163,6 +169,37 @@ Their dependencies still belong here - `procps` is listed for exactly that
 reason. `make-manifest.py apply` records them separately, under
 `applied.payload_packages`, via repeatable `--payload-package NAME` arguments,
 so the manifest can still answer "which Syncthing is on this VM".
+
+## The SAP client bundles
+
+`extra_tgz/sap.ase-client.16.tgz` and `extra_tgz/sap.sql-anywhere-client.16.tgz`
+are self-contained trees, unpacked by `guest-install.sh` into `/opt`. The prefix
+is not a choice: `sap/SYBASE.sh` hard-codes `SYBASE=/opt/sap` and
+`sqlanywhere16/bin64/sa_config.sh` hard-codes `SQLANY16=/opt/sqlanywhere16`, so
+they go to `/opt` or nowhere. `SYBASE_OCS` is read off the bundle rather than
+hard-coded, because it moves with the release (`OCS-16_1` today, not the
+`OCS-16_0` most documentation assumes).
+
+Both are installed as mechanism only. No `interfaces` file is written: server
+names and addresses are configuration, and configuration is the operator's, on
+the encrypted disk. `dscp` builds one; `dsedit` is the same tool with a Motif
+UI and cannot run on a headless server.
+
+**The ASE bundle is a repacked subset of the vendor install, not the vendor
+install.** The full tree is 261 MiB compressed and 520 MiB on disk, over
+GitHub's 100 MiB per-file limit and mostly irrelevant here. What ships is the
+client and the SDK - `OCS-16_1` entire, plus the `config`, `locales`, `collate`
+and `charsets` trees CS-Lib reads at `cs_ctx_alloc` - at 45 MiB compressed and
+125 MiB on disk. Dropped: two bundled JREs (`shared/`, `jre64/`) on a VM that
+already has openjdk-25, an uninstaller for an install that never happened
+(`sybuninstall/`), the jConnect JDBC driver, the DBISQL Motif GUI, the Ribo TDS
+tracer, and the vendor's install logs. The kept trees are byte-identical to the
+vendor's.
+
+Repack from the full bundle again if a dropped component turns out to be
+needed - jConnect is the likely candidate, if anything here ever talks JDBC.
+
+`tests/db-clients/run.sh` is what proves all of this still holds.
 
 ## Payload merge
 

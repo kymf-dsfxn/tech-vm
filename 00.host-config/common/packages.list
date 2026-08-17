@@ -27,6 +27,10 @@ podman
 uidmap
 passt
 xorriso
+build-essential
+#   pkg-config - how most C build systems locate libpq (libpq-dev ships
+#                libpq.pc); build-essential does not pull it in.
+pkg-config
 
 # Local-build toolchain: matches what the sdlc build images install, so the VM
 # can run full local builds of the code they cover. Non-apt tools (syft, shfmt,
@@ -46,3 +50,19 @@ psmisc
 #   procps       - the only dependency of syncthing_*_amd64.deb beyond libc6.
 #                  Syncthing itself comes from .deb under payload/extra_deb/.
 procps
+
+# Postgres DB Client & Development
+#   libpq-dev puts libpq-fe.h under /usr/include/postgresql, so C builds need
+#   `pkg-config --cflags libpq` or -I$(pg_config --includedir); a bare -lpq
+#   does not find the header.
+postgresql-client-18
+libpq-dev
+
+# SAP ASE / SQL Anywhere clients (unpacked from payload/extra_tgz, see
+# guest-install.sh). The bundles are self-contained apart from one library:
+#   libncurses6  - dbisqlc, the SQL Anywhere character-mode client, is still
+#                  linked against the ncurses 5 soname. Ubuntu ships no
+#                  ncurses 5, and only libncursesw6 arrives as a dependency of
+#                  other packages, so the non-wide runtime is named here for
+#                  the compat link guest-install.sh creates onto it.
+libncurses6

@@ -213,6 +213,92 @@ else
     info "No Liquibase tarball in payload, skipping"
 fi
 
+# --- SAP ASE Open Client + SDK (from payload tarball) ------------------------
+# isql/bcp against ASE, and the CT-Lib headers and libraries to build C clients
+# against it. Unlike Maven and Liquibase the prefix is not ours to choose: the
+# bundle is rooted at ./sap and the SYBASE.sh it carries hard-codes
+# SYBASE=/opt/sap, so it unpacks to /opt and nowhere else.
+log "Install SAP ASE Open Client"
+ASE_TARBALL="$(find "${PAYLOAD_TGZ}" -maxdepth 1 -name 'sap.ase-client.*.tgz' | head -1)"
+if [[ -n "${ASE_TARBALL}" ]]; then
+    # --no-same-owner: the bundled JRE carries the packager's numeric uid/gid,
+    # which means nothing on this node. Everything is world-readable anyway.
+    tar -xzf "${ASE_TARBALL}" --no-same-owner -C /opt
+    # SYBASE_OCS is a directory name that moves with the release (16_1 here,
+    # not the 16_0 the docs assume), so read it off the bundle.
+    ASE_OCS="$(find /opt/sap -maxdepth 1 -name 'OCS-*' -printf '%f\n' | head -1)"
+
+    # $SYBASE is not decoration: CT-Lib reads the locale and charset trees
+    # under it at cs_ctx_alloc time, so anything built against Client-Library
+    # fails at startup without it, however well the libraries resolve.
+    # SYBPLATFORM is the SDK's own name for the build target and is fixed for
+    # this image - the sample makefiles refuse to run without it. Threaded
+    # applications want nthread_linuxamd64 and the _r64 libraries instead.
+    cat > /etc/profile.d/sap-ase.sh <<EOF
+export SYBASE=/opt/sap
+export SYBASE_OCS=${ASE_OCS}
+export SYBPLATFORM=linuxamd64
+export PATH="\${SYBASE}/\${SYBASE_OCS}/bin:\${PATH}"
+EOF
+    chmod 0644 /etc/profile.d/sap-ase.sh
+
+    # Resolve CT-Lib for programs built against it without every caller having
+    # to export LD_LIBRARY_PATH. Safe to put on the system path: every soname
+    # here is libsyb*/libsap*, none of which collides with the archive.
+    # lib3p64 holds the crypto providers libsybfssl64 loads for SSL logins.
+    printf '/opt/sap/%s/lib\n/opt/sap/%s/lib3p64\n' "${ASE_OCS}" "${ASE_OCS}" \
+        > /etc/ld.so.conf.d/sap-ase.conf
+    chmod 0644 /etc/ld.so.conf.d/sap-ase.conf
+    info "SAP ASE Open Client at /opt/sap (${ASE_OCS})"
+    # No interfaces file is written: server names and addresses are config, and
+    # config is the operator's, on the encrypted disk. `dscp` builds one.
+else
+    info "No SAP ASE client tarball in payload, skipping"
+fi
+
+# --- SAP SQL Anywhere client + SDK (from payload tarball) --------------------
+# The client side of IQ: ODBC/JDBC drivers, the sacapi C API headers, and the
+# dbisqlc/dbping/dbdsn commands. Rooted at ./sqlanywhere16, and its sa_config.sh
+# hard-codes SQLANY16=/opt/sqlanywhere16, so this one also unpacks to /opt.
+log "Install SAP SQL Anywhere client"
+SQLANY_TARBALL="$(find "${PAYLOAD_TGZ}" -maxdepth 1 -name 'sap.sql-anywhere-client.*.tgz' | head -1)"
+if [[ -n "${SQLANY_TARBALL}" ]]; then
+    tar -xzf "${SQLANY_TARBALL}" --no-same-owner -C /opt
+    SQLANY_HOME="$(find /opt -maxdepth 1 -name 'sqlanywhere*' -type d | head -1)"
+    SQLANY_VER="${SQLANY_HOME##*/sqlanywhere}"
+
+    # SQLANY${SQLANY_VER} is the variable name the runtime itself looks for, and
+    # it too is load-bearing: sqlany_init resolves the message catalogues under
+    # it, so a C client that links fine still fails to initialise without it.
+    cat > /etc/profile.d/sap-sqlanywhere.sh <<EOF
+export SQLANY${SQLANY_VER}=${SQLANY_HOME}
+export PATH="${SQLANY_HOME}/bin64:\${PATH}"
+EOF
+    chmod 0644 /etc/profile.d/sap-sqlanywhere.sh
+
+    printf '%s/lib64\n' "${SQLANY_HOME}" > /etc/ld.so.conf.d/sap-sqlanywhere.conf
+    chmod 0644 /etc/ld.so.conf.d/sap-sqlanywhere.conf
+
+    # dbisqlc is the one binary in the bundle still linked against the ncurses 5
+    # soname, which Ubuntu no longer ships. The link has to sit in the system
+    # library directory rather than beside the bundle: ldconfig indexes by
+    # SONAME, so a libncurses.so.5 in lib64 would be cached as libncurses.so.6
+    # and never resolve. Nothing in the archive owns or wants the .so.5 name.
+    if [[ ! -e /usr/lib/x86_64-linux-gnu/libncurses.so.5 ]]; then
+        ln -s libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5
+        info "Linked libncurses.so.5 -> libncurses.so.6 for dbisqlc"
+    fi
+    info "SAP SQL Anywhere client at ${SQLANY_HOME}"
+else
+    info "No SAP SQL Anywhere client tarball in payload, skipping"
+fi
+
+# Pick up whichever of the two ld.so.conf.d fragments were written above. The
+# one warning it emits is for lib3p64/libslcryptokernel.so.sha256, a checksum
+# sidecar the bundle keeps beside its library; it is not an ELF file and is
+# not meant to be loaded.
+ldconfig
+
 # --- Standalone build tools (syft, shfmt, uv) --------------------------------
 # Not apt packages: fetched at ISO-build time by fetch-build-tools.sh, copied
 # straight into /usr/local/bin.
