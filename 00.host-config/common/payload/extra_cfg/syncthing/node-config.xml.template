@@ -3,24 +3,27 @@
          Guest node template for the platform share. Design:
          capability.data-synchronisation.md.
 
-         Two placeholder namespaces; sync-node render refuses to write while
-         any of either kind survives.
-
-         AUTOFILL_* are filled by render, on the node. Nothing to do:
+         This template ships COMPLETE: every estate value is a literal here,
+         so a guest renders with no hand editing at all. Only the AUTOFILL_
+         namespace remains, and render fills it on the node:
            AUTOFILL_DEVICE_ID_SELF       from the identity on the encrypted disk
            AUTOFILL_DEVICE_NAME          this guest's host name
            AUTOFILL_API_KEY              128 fresh random bits, per node
 
-         MANUALLY_FIX_* are filled by a person, once, in the REPOSITORY copy at
-         00.host-config/common/payload/extra_cfg/syncthing/ (a guest-only edit
-         is lost at the next image):
-           MANUALLY_FIX_FOLDER_ID        the hub's folder ID, exactly
-           MANUALLY_FIX_HUB_DEVICE_ID    the hub's device ID (a public key)
-           MANUALLY_FIX_HUB_LAN_ADDRESS  the NAS on the house LAN
-           MANUALLY_FIX_HUB_ADDRESS      the DDNS name for the house
+         The estate values below (folder id, hub device id, hub address) are
+         identical on every guest and none is a secret - a device id is a
+         public key. They are edited HERE, in the REPOSITORY copy at
+         00.host-config/common/payload/extra_cfg/syncthing/, when the estate
+         itself changes; a guest-only edit to /etc/syncthing/ works for that
+         guest and is lost at the next image.
 
-         The hub port is a fixed 22000 on both paths: the router forwards
-         22000 to 22000 by intention. See the public-path comment below.
+         The MANUALLY_FIX_ mechanism is retained, not retired: render still
+         refuses to write while any such token survives, which is what guards
+         a value added later (the relay line below is the standing example).
+         An empty MANUALLY_FIX_ set is the normal state, not a disabled check.
+
+         The hub port is a fixed 22000: the router forwards 22000 to 22000 by
+         intention. See the hub address comment below.
 
          version="52" is what Syncthing 2.1.3 writes; author at the version the
          binary writes or the on-ISO file and the in-service file disagree from
@@ -30,17 +33,19 @@
          ===================================================================== -->
 
     <!-- The folder id must equal the hub's, character for character: folders
-         match across devices by ID alone. Read it on the hub (Edit Folder, or
-         `syncthing cli config folders list`); expect a random pair like
-         "abcde-12345". A mismatch does not error - it arrives as a New Folder
+         match across devices by ID alone. It cannot be changed after the
+         folder is created, and the hub's id is already held by the laptops, so
+         the guest is always the side that changes. Re-read it on the hub (Edit
+         Folder, or `syncthing cli config folders list`) before ever editing
+         this line. A mismatch does not error - it arrives as a New Folder
          offer with a nested-path warning. The label is local and may say
          anything. -->
-    <folder id="MANUALLY_FIX_FOLDER_ID" label="dsfxn platform share" path="/srv/dsfxn/share"
+    <folder id="wqa6q-yhpjx" label="data-sync" path="/srv/dsfxn/share"
             type="sendreceive" rescanIntervalS="3600" fsWatcherEnabled="true"
             fsWatcherDelayS="10" ignorePerms="false" autoNormalize="true">
         <filesystemType>basic</filesystemType>
         <device id="AUTOFILL_DEVICE_ID_SELF" introducedBy=""></device>
-        <device id="MANUALLY_FIX_HUB_DEVICE_ID" introducedBy=""></device>
+        <device id="IHWXMZT-6XMZUH6-YCR37GD-PFHI4NP-6ZNFLP4-2ZRYH2C-4IUONRQ-54FLLAC" introducedBy=""></device>
 
         <!-- markerName is a CHILD element, not an attribute: as an attribute
              it is accepted, silently ignored, and the guard reverts to
@@ -96,29 +101,34 @@
          two devices are never mutual introducers. autoAcceptFolders stays
          false so a local path is always a decision.
 
-         Two paths, both needed, dialled in no particular order (priority comes
-         from the connectionPriority values below). There is deliberately no
-         "dynamic" entry: discovery cannot reach the NAS from behind VMware NAT
-         so it would resolve to nothing on every dial - add it back the day a
-         guest moves to bridged networking. Rationale:
+         One name, two transports, dialled in no particular order (priority
+         comes from the connectionPriority values below). There is deliberately
+         no "dynamic" entry: discovery cannot reach the NAS from behind VMware
+         NAT so it would resolve to nothing on every dial - add it back the day
+         a guest moves to bridged networking. Rationale:
          capability.data-synchronisation.md, "Connectivity". -->
-    <device id="MANUALLY_FIX_HUB_DEVICE_ID" name="hub-qnap"
+    <device id="IHWXMZT-6XMZUH6-YCR37GD-PFHI4NP-6ZNFLP4-2ZRYH2C-4IUONRQ-54FLLAC" name="ds-nas-01"
             compression="metadata" introducer="true" skipIntroductionRemovals="false"
             introducedBy="">
-        <!-- The LAN path, on the listener's real port. Not a tuning detail:
-             without it a guest at home dials the WAN address and hairpins into
-             the router, which needs NAT reflection - off on OPNsense - so the
-             dial fails. -->
-        <address>tcp://MANUALLY_FIX_HUB_LAN_ADDRESS:22000</address>
-        <address>quic://MANUALLY_FIX_HUB_LAN_ADDRESS:22000</address>
-        <!-- The public path, on the same fixed 22000: the router forwards
+        <!-- One address for both paths, on a fixed 22000: the router forwards
              22000 to the hub's 22000, deliberately untranslated. Translating
              the external port to a non-default one is a documented hardening
              option, not taken (capability.data-synchronisation.md,
-             "Exposure"); taking it means changing the port in these two
-             addresses on every node. -->
-        <address>tcp://MANUALLY_FIX_HUB_ADDRESS:22000</address>
-        <address>quic://MANUALLY_FIX_HUB_ADDRESS:22000</address>
+             "Exposure"); taking it means changing the port here on every node.
+
+             There is no separate LAN address, and that rests on one assumption:
+             the house resolver answers sync.disfix.net with the hub's LAN
+             address (10.66.10.117) rather than the WAN one, so a guest at home
+             dials straight to the NAS. Without that split horizon the name
+             resolves to the WAN address and the dial hairpins into the router,
+             which needs NAT reflection - off on OPNsense - and fails. The
+             assumption is therefore load bearing: it lives on OPNsense as an
+             Unbound host override, not in this file. If home connections start
+             failing while remote ones work, check that override first. Test
+             remote access from a mobile hotspot; the home LAN never exercises
+             the forward. -->
+        <address>tcp://sync.disfix.net:22000</address>
+        <address>quic://sync.disfix.net:22000</address>
         <paused>false</paused>
         <autoAcceptFolders>false</autoAcceptFolders>
         <untrusted>false</untrusted>
@@ -158,10 +168,13 @@
         <localAnnounceEnabled>true</localAnnounceEnabled>
         <localAnnouncePort>21027</localAnnouncePort>
 
-        <!-- The whole estate counts as local. Without this a guest (always on
-             a different subnet from the NAS) classes the LAN path as WAN and
-             gives it priority 30 instead of 10. Also exempts these connections
-             from any later rate limit. -->
+        <!-- The whole estate counts as local. This carries more weight now
+             that one name serves both paths: at home the name resolves to
+             10.66.10.117, and it is this setting - not the address list - that
+             makes the resulting connection count as LAN. Without it a guest
+             (always on a different subnet from the NAS) classes that same
+             connection as WAN and gives it priority 30 instead of 10. Also
+             exempts these connections from any later rate limit. -->
         <alwaysLocalNet>10.66.0.0/16</alwaysLocalNet>
 
         <!-- The guest dials out. Nothing dials in, so there is nothing to map. -->

@@ -94,12 +94,12 @@ Commands:
   render    Write {SYNC_CONFIG}
             from the template. Refuses to overwrite, because Syncthing owns that
             file once it is running. --force replaces it.
-            The template holds two kinds of placeholder. AUTOFILL_ values are
-            filled here, per node. MANUALLY_FIX_ values are filled by a person in
-            the repository copy, and render refuses while any survives.
+            The shipped template carries the estate values as literals, so
+            nothing needs editing first. AUTOFILL_ values are filled here, per
+            node. MANUALLY_FIX_ values, if a later change adds any, are filled by
+            a person in the repository copy; render refuses while one survives.
   ensure    identity and render, each only if absent. Quiet and idempotent, and
-            the shortest path from a fresh unlock to a startable node once the
-            hub values are in the template.
+            the shortest path from a fresh unlock to a startable node.
   marker    Report the marker name the daemon is really using, and whether the
             marker exists. With --create, create it; on an empty share that also
             needs --force, because it is how a locked disk becomes a mass delete.
@@ -391,15 +391,35 @@ def cmd_status():
     _row("share", f"{SHARE_DIR} "
          + ("(present)" if os.path.isdir(SHARE_DIR) else "(absent)"))
     _row("syncthing", version)
-    # Before the config line: an unfinished template is the cause, "not
-    # rendered" only the symptom.
+    # Before the config line: on a node that will not start, an unfinished
+    # template is the cause and "not rendered" only the symptom.
+    #
+    # That reasoning holds only while there is no config. Once one exists the
+    # template is an inert file - render refuses to overwrite a config, so its
+    # placeholders can never reach this node - and reporting them as work to do
+    # sends the operator to edit a file this node will never read again. A data
+    # disk carried onto a rebuilt VM makes that routine: fresh template on the
+    # new OS disk, rendered config surviving on the old data disk.
+    #
+    # have_config() needs root, so an unprivileged caller gets the conditional
+    # answer rather than a guess - the same rule the identity and config rows
+    # follow.
     if os.access(SYNC_TEMPLATE, os.R_OK):
         _, pending = pn.scan_template(SYNC_TEMPLATE)
-        if pending:
+        if not pending:
+            _row("template", f"{SYNC_TEMPLATE} (complete)")
+        elif not state_readable():
+            _row("template", f"{len(pending)} values unfilled - matters only if this "
+                             f"node has no config yet")
+            print(f"  {'':<12}   run: sudo sync-node status")
+        elif have_config():
+            _row("template", f"{len(pending)} values unfilled, unused by this node "
+                             f"(its config is already rendered)")
+            print(f"  {'':<12}   fix them in the repository copy so the next image "
+                  f"ships complete")
+        else:
             _row("template", f"{len(pending)} values still to fix by hand:")
             print(f"  {'':<12}   {', '.join(pending)}")
-        else:
-            _row("template", f"{SYNC_TEMPLATE} (complete)")
     else:
         _row("template", f"{SYNC_TEMPLATE} absent")
     _row("identity", identity_report())

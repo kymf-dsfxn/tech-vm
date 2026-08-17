@@ -29,6 +29,15 @@ and is ported verbatim; deviations are listed in the port's commit message.
   surviving MANUALLY_FIX_ (names the file to edit, repository copy) and
   surviving AUTOFILL_ (says fix the build, not the node); `marker --create`
   refuses an empty share without `--force`.
+  The shipped template holds no MANUALLY_FIX_ token, so that refusal is
+  normally unreachable. It stays in the contract regardless: it is the guard
+  for any value a later change adds, and an empty token set is the normal
+  state, not a retired check.
+- `status` reports unfilled template values as work to do only when the node
+  has no config. With a config present the template cannot reach the node
+  (`render` will not overwrite), and the row must say so instead of naming an
+  edit. Unprivileged callers cannot read the config and must get the
+  conditional wording, never a guess.
 
 ## The machine-consumed interfaces (must stay stable)
 

@@ -15,7 +15,7 @@ on is `capability.encrypted-datadisk.md`.
 | laptops A, B, C | Windows, VMware Workstation | user workstations, roaming |
 | guests 0010/0020/0030 | Ubuntu behind VMware NAT (`10.66.81/82/83.x`) | the replica that matters, on LUKS |
 | QNAP TS-673A | `syncthing/syncthing` container, host networking | hub and introducer, always on |
-| OPNsense | home LAN edge | NAT, DDNS, the port forward |
+| OPNsense | home LAN edge | NAT, DDNS, the port forward, and the split-horizon DNS override that resolves the hub name to its LAN address inside the house |
 
 Hub-and-spoke, and it is the only shape that survives the constraints. Each
 laptop is sometimes on the home LAN, sometimes on open internet, sometimes
@@ -184,42 +184,60 @@ on. The config must exist before the binary is ever reached.
 
 Order per node: unlock, `identity`, admit on the hub, `render`, start the
 service, set the folder receive-only for first convergence, verify the marker
-name comes back from the daemon, then switch to send-receive.
+name comes back from the daemon, then switch to send-receive. No template
+editing appears in that list, and that is the point - the shipped template is
+already complete.
 
-### The template's two placeholder namespaces
+A node whose data disk was carried over from a previous VM skips most of it:
+the identity, the rendered config and the index all survive on the encrypted
+disk, so `data-disk unlock` alone brings the node back, with no `identity`, no
+`render`, no re-admission on the hub and no first-convergence pass. See
+`wd.virtual-machines/data-disk-preserving.vm-update.md`.
 
-The template holds placeholders of two kinds, and the prefix says whose job
-each one is. `render` refuses to write while either kind survives, because an
-unfilled address fails as a quiet absence of peers rather than as an error.
+### The template ships complete
 
-`AUTOFILL_*` are filled by `render`, on the node: `AUTOFILL_DEVICE_ID_SELF`
-from the identity, `AUTOFILL_DEVICE_NAME` from the host name,
-`AUTOFILL_API_KEY` as 128 fresh random bits. They are per-node values that
-cannot exist in a repository.
+The estate values - folder ID, hub device ID, hub address - are literals in
+the repository template, so a guest renders with no hand editing at all. None
+of them is a secret (a device ID is a public key) and all three are identical
+on every guest, so a repository is the right home for them. They are edited
+there when the estate itself changes; editing only
+`/etc/syncthing/node-config.xml.template` on a guest works for that guest and
+loses the change at the next image.
 
-`MANUALLY_FIX_*` are filled by a person, once, in the repository copy under
-`common/payload/extra_cfg/syncthing/`, before the ISO is built: the folder ID,
-the hub device ID, the hub LAN address and the hub DDNS name. They are
-identical on every guest and a guest cannot work them out. (The hub port is
-not one of them: it is a fixed 22000 in the template - see Exposure.) Editing
-only `/etc/syncthing/node-config.xml.template` on a guest works for that guest
-and loses the change at the next image.
+That leaves one placeholder namespace live in the shipped file. `AUTOFILL_*`
+are filled by `render`, on the node: `AUTOFILL_DEVICE_ID_SELF` from the
+identity, `AUTOFILL_DEVICE_NAME` from the host name, `AUTOFILL_API_KEY` as 128
+fresh random bits. They are per-node values that cannot exist in a repository.
 
-The two get separate refusals because they have separate remedies: a surviving
-`MANUALLY_FIX_` value names the file to edit; a surviving `AUTOFILL_` value
-means template and `sync-node` shipped out of step, so the message says to fix
-the build, not the node. `sync-node status` reports the placeholder count
-before the config line, because on a node that will not start an unfinished
-template is the cause and "not rendered" is only the symptom.
+The `MANUALLY_FIX_*` mechanism is retained rather than retired. `render` still
+refuses to write while any such token survives, and that guard is what a value
+added later relies on - the commented relay line is the standing example. An
+empty `MANUALLY_FIX_` set is the normal state, not a disabled check. The two
+namespaces keep separate refusals because they have separate remedies: a
+surviving `MANUALLY_FIX_` value names the file to edit; a surviving `AUTOFILL_`
+value means template and `sync-node` shipped out of step, so the message says
+to fix the build, not the node.
+
+`sync-node status` reports unfilled template values before the config line,
+because on a node that will not start an unfinished template is the cause and
+"not rendered" is only the symptom. That ordering holds only while there is no
+config: once one exists, `render` refuses to overwrite it, so the template is
+inert for that node and the row says so rather than naming work to do. The
+case that makes this routine is a data disk carried onto a rebuilt VM - fresh
+template on the new OS disk, rendered config surviving on the old data disk.
+Because the check needs root, the unprivileged row states the condition
+instead of guessing, the same rule the identity and config rows follow.
 
 ### Folders match by ID, and by nothing else
 
-`MANUALLY_FIX_FOLDER_ID` must equal the hub's folder ID character for
+The template's folder ID (`wqa6q-yhpjx`) must equal the hub's character for
 character. Syncthing pairs folders across devices by ID alone: not by path,
-which differs on every node, and not by label, which is a local caption. Read
-the real value on the hub (Edit Folder, or `syncthing cli config folders
-list`); expect a random pair like `abcde-12345` even when the label reads like
-a name; it cannot be changed after the folder is created.
+which differs on every node, and not by label, which is a local caption. It
+cannot be changed after the folder is created, and the hub's ID is already
+held by the laptops, so the guest is always the side that changes. Before ever
+editing that literal, re-read the real value on the hub (Edit Folder, or
+`syncthing cli config folders list`); expect a random pair like `abcde-12345`
+even when the label reads like a name.
 
 A mismatch does not error. The hub's folder arrives as a New Folder offer, the
 guest's own folder sits idle because no peer shares it, and the offer's
@@ -240,16 +258,34 @@ make two devices mutual introducers: removals then loop. `autoAcceptFolders`
 stays off everywhere: introduction adds devices to folders you already hold,
 never creates folders, so the local path is always a decision.
 
-The hub entry carries four addresses - TCP and QUIC for each of two paths - and
-both paths are needed:
+The hub entry carries two addresses - TCP and QUIC for one name,
+`tcp|quic://sync.disfix.net:22000`. One name serves both paths, and which path
+a dial takes is decided by DNS rather than by the address list:
 
-- The LAN pair (`tcp|quic://<hub lan address>:22000`) is not a tuning detail.
-  Without it, a guest at home dials the DDNS name, gets the WAN address, and
-  hairpins into the router from inside, which needs NAT reflection - off by
-  default on OPNsense - so the dial fails. The LAN path routes out through the
-  VMware NAT gateway, is faster, and survives the WAN being down.
-- The public pair (`tcp|quic://<ddns name>:<public port>`) is what works away
-  from home.
+- **At home**, the house resolver answers `sync.disfix.net` with the hub's LAN
+  address, so the dial routes out through the VMware NAT gateway straight to
+  the NAS - faster, and it survives the WAN being down.
+- **Away from home**, the same name resolves publicly and the dial arrives
+  through the port forward.
+
+This rests on split-horizon DNS, and that assumption is load bearing. It lives
+on OPNsense as an Unbound host override mapping `sync.disfix.net` to
+`10.66.10.117`, not in any node's config. Without it the name resolves to the
+WAN address from inside the house and the dial hairpins into the router, which
+needs NAT reflection - off by default on OPNsense - so it fails. The symptom is
+specific and worth recognising: home connections fail while remote ones work.
+Check the override before anything else.
+
+The earlier design carried a second, literal LAN pair in every node's address
+list to avoid depending on the resolver. Moving the LAN answer into DNS trades
+that for one authority instead of one-per-node: a hub that changes LAN address
+is then a single Unbound edit rather than a template change and a re-render on
+every guest. The cost is the new failure mode above, and it is silent until
+someone is at home.
+
+Note that `alwaysLocalNet` carries more weight under this model, not less: at
+home the connection is to `10.66.10.117`, and it is that setting - no longer
+the address list - which makes Syncthing class the connection as LAN.
 
 There is no `dynamic` entry for the hub, and that is a decision. `dynamic`
 means "find it by discovery"; global discovery is off, and local discovery is
@@ -390,19 +426,25 @@ how often each one is the answer:
 2. Is the hub's Addresses field still `dynamic` alone on that node? With global
    discovery off and no relay, that only works on the same broadcast domain.
    The most common cause.
-3. Windows Defender Firewall with no rule for a service-installed Syncthing
+3. **Failing at home but fine remotely?** That signature is the split-horizon
+   DNS override, not Syncthing. `sync.disfix.net` must resolve to
+   `10.66.10.117` from inside the house; if it returns the WAN address the dial
+   hairpins and NAT reflection is off. Check the Unbound host override on
+   OPNsense - see Connectivity, Addresses.
+4. Windows Defender Firewall with no rule for a service-installed Syncthing
    (a service install gets no interactive prompt; add rules for TCP/UDP 22000
    and UDP 21027).
-4. Where is the node? At home local discovery connects laptops in seconds;
+5. Where is the node? At home local discovery connects laptops in seconds;
    anywhere else only a configured address can.
-5. Can it reach the port at all? `Test-NetConnection <hub> -Port 22000` at
-   home, the DDNS name from a hotspot.
-6. Is the hub listening? Zero listeners on the hub's device panel means the
+6. Can it reach the port at all? `Test-NetConnection sync.disfix.net -Port
+   22000` from both a home node and a hotspot - the two answers separate a DNS
+   problem from a forwarding one.
+7. Is the hub listening? Zero listeners on the hub's device panel means the
    container never bound the port - a conflict under host networking.
-7. Does the forward have a firewall rule attached?
-8. Is the WAN address actually public? Carrier NAT defeats every forward.
-9. Both sides must hold the other's device ID; a one-sided entry shows
-   Disconnected on that side only.
+8. Does the forward have a firewall rule attached?
+9. Is the WAN address actually public? Carrier NAT defeats every forward.
+10. Both sides must hold the other's device ID; a one-sided entry shows
+    Disconnected on that side only.
 
 **Watches**: a watch per file is how `fsWatcherEnabled` sees changes, and
 running out is quiet - Syncthing falls back to periodic scans and says so once.
@@ -422,24 +464,30 @@ deliberate act of replacing the file. Keep all three Linux nodes on one version
 the hub's GUI shows the estate; an alarm can poll `/rest/db/status` on the hub
 for a non-empty `errors` count.
 
-**Test remote access from a mobile hotspot, not the home LAN**: a forward is
-not exercised from inside, and dialling the DDNS name from inside needs NAT
-reflection, which is off. The LAN pair in the address list is what avoids
-needing reflection at all.
+**Test both paths, and test them separately**: a forward is not exercised from
+inside the house, so remote access needs a mobile hotspot to prove. The home
+path needs its own check, because one name now serves both - confirm that
+`sync.disfix.net` resolves to `10.66.10.117` from a guest at home. A single
+name that resolves correctly in only one location fails in exactly one
+location, and neither test finds that on its own.
 
 ## Deployment record
 
 Values that define the deployed estate. The hub device ID is a public key;
-none of these are secrets.
+none of these are secrets. The first four are literals in the repository
+template, so this table and
+`00.host-config/common/payload/extra_cfg/syncthing/node-config.xml.template`
+must agree - change one and change the other.
 
 | Value | Setting |
 | ----- | ------- |
 | Hub device ID (`ds-nas-01`) | `IHWXMZT-6XMZUH6-YCR37GD-PFHI4NP-6ZNFLP4-2ZRYH2C-4IUONRQ-54FLLAC` |
-| Hub DDNS name | `sync.disfix.net` |
-| Hub LAN address | `10.66.10.117` |
+| Hub name (both paths) | `sync.disfix.net` |
+| Folder ID | `wqa6q-yhpjx` - must match the hub character for character; it cannot be changed after creation |
 | Hub public port | `22000` - the forward is deliberately untranslated (see Exposure for the translation option, not taken) |
-| Folder ID | not recorded anywhere yet - read it off the hub and fill `MANUALLY_FIX_FOLDER_ID` in the repository template |
+| Hub LAN address | `10.66.10.117` - no longer in any node config; it is the answer the OPNsense Unbound host override gives for `sync.disfix.net` inside the house (see Connectivity, Addresses) |
 | Guest 0010 device ID | `2Q7VKHZ-ZFOYBMQ-ZDZH3CM-3GKTV7B-X2FPPSK-BPFR2W4-K4I2CFE-2O5Q4AJ` |
+| Guest 0030 device ID | `ODE3I5W-DVMKNYJ-NK5EOYL-QXD3NWH-QNTSYDB-YM5PXL6-W6WM5GP-6CER3AY` |
 | Marker name | `.dsfxn-share-marker` |
 | Versioning | staggered, 30-day floor, every node |
 | Version line | 2.x everywhere; guests and hub pinned 2.1.3 |
