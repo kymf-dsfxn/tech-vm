@@ -13,6 +13,8 @@
 #      rather than copied here, so this test fails when that file drifts
 #   3. isql, bcp, dbisqlc, dbping and psql run from a login shell
 #   4. the three smoke clients compile and run against what step 2 installed
+#   5. odbcinst sees the driver the SQL Anywhere stanza registers, and
+#      libodbc.so.2 (what pyodbc actually links against) resolves
 #
 # Exit status is 0 only if every check passed.
 # =============================================================================
@@ -174,7 +176,15 @@ check 'sa_smoke runs on $SQLANY16 alone' \
     env -i SQLANY16=/opt/sqlanywhere16 /tmp/build/sa_smoke
 
 # -----------------------------------------------------------------------------
-step "7. installed footprint"
+step "7. ODBC driver registration (unixODBC / pyodbc)"
+# -----------------------------------------------------------------------------
+check_output "odbcinst -q -d lists the SQL Anywhere driver" 'SQL Anywhere 16' \
+    odbcinst -q -d
+check "libodbc.so.2 resolves (pyodbc's link target)" \
+    bash -lc 'python3 -c "import ctypes; ctypes.CDLL(\"libodbc.so.2\")"'
+
+# -----------------------------------------------------------------------------
+step "8. installed footprint"
 # -----------------------------------------------------------------------------
 du -sh /opt/sap /opt/sqlanywhere16
 

@@ -135,8 +135,9 @@
     </device>
 
     <gui enabled="true" tls="false" debugging="false" sendBasicAuthPrompt="false">
-        <!-- Loopback only, never on the network. Reach it with: sync-node gui -->
-        <address>127.0.0.1:8384</address>
+        <!-- Was Loopback only. Now All addresses because allows VMware NAT to get
+             to gui without SSH tunnel -->
+        <address>0.0.0.0:8384</address>
         <apikey>AUTOFILL_API_KEY</apikey>
         <theme>default</theme>
         <metricsWithoutAuth>false</metricsWithoutAuth>

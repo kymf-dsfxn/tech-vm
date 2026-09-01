@@ -201,6 +201,16 @@ needed - jConnect is the likely candidate, if anything here ever talks JDBC.
 
 `tests/db-clients/run.sh` is what proves all of this still holds.
 
+### ODBC (unixODBC / pyodbc)
+
+The SQL Anywhere driver is also registered with unixODBC, under the alias
+`SQL Anywhere 16` (an odbcinst.ini label, not the actual `SQLANY_VER` of the
+bundle - it is what the migration-project's Python extraction scripts
+will need to pass via `--driver`). This is what lets Python's `pyodbc` connect
+without any manual `odbcinst` step per VM. `unixodbc` and `odbcinst` are
+separate packages on this release - `odbcinst` is not pulled in as a
+dependency of `unixodbc` - so both are listed in `packages.list`.
+
 ## Payload merge
 
 Common payload applies to every host. A per-host `payload/` overrides it on a

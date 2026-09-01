@@ -134,10 +134,74 @@ faithfully, and no other account can edit it on any node: one node's hardening
 becomes every node's lockout. Hence `UMASK=002` in the hub compose file and
 `UMask=0002` in the guest drop-in, overriding the packaged `UMask=7027`. Both
 are load-bearing. The umask also decides the mode of files arriving from a node
-that ignores permissions - which is every Windows node. Of what 7027 protected
-against, setuid/setgid stay blocked (`RestrictSUIDSGID=true` is untouched);
-what is given up is that files in the share are world-readable on this guest,
-on an encrypted disk whose accounts are the platform's own.
+that ignores permissions - which is every Windows node. What is given up is
+that files in the share are world-readable on this guest, on an encrypted disk
+whose accounts are the platform's own.
+
+### Setgid does not replicate, and the sandbox must allow it anyway
+
+Only the low nine bits cross the wire; Syncthing masks the mode to `0777`
+before sending it. The `2` in `2775` therefore never arrives from anywhere.
+Each node regenerates it locally, because the kernel copies both the group and
+the setgid bit onto every directory created inside a setgid directory. That is
+why group `dsfxn` inheritance holds without anything replicating it, and it is
+also why a node that has lost the bit somewhere up its tree quietly stops
+inheriting below that point.
+
+Syncthing still has to *set* the bit locally, though: it creates a directory
+with `mkdir`, whose mode the umask trims, then chmods it to the intended mode
+with the special bits it observed re-applied - `chmod 02775`. An earlier
+version of this document treated upstream's `RestrictSUIDSGID=true` as a
+harmless leftover of `UMask=7027`. It is not. It is a seccomp filter that
+returns `EPERM` for any chmod carrying `S_ISUID` or `S_ISGID`, so it refuses
+exactly that call, on every directory, forever.
+
+The failure is quiet in the worst way: permissions on disk are already correct,
+so nothing looks wrong, but the mkdir/chmod pair never completes and the
+directory is never recorded as done. Measured on `xd00-lde-0030` before the
+fix - `needFiles 0` and `inSyncFiles 138206`, so every byte of content was
+present, against `needDirectories 1806` and `pullErrors 1806` that never
+decreased. A full strace showed 747 distinct `fchmodat` calls in one pass, all
+of them `02775`, all of them refused. A setgid tree and this filter cannot both
+stand. The drop-in sets `RestrictSUIDSGID=false`.
+
+Most of what the filter protected against is unreachable anyway. Syncthing has
+no ambient `CAP_CHOWN` - verified, a `chown` as `stsync` is refused even with
+`CAP_FOWNER` held - so it cannot create or give away a file owned by anything
+but `stsync`, and a setuid bit on a file it wrote confers `stsync`, the uid it
+already runs as. No root-owned setuid file is reachable from here.
+
+One case is not nil and is recorded rather than glossed. `CAP_FOWNER`, granted
+below, also lets Syncthing chmod files it does *not* own, so a peer pushing
+mode `4755` for a path that happens to be `kymf`-owned locally would produce a
+setuid-`kymf` binary - and `kymf` holds NOPASSWD sudo. That needs an already
+compromised trusted device, which at that point can equally push a malicious
+script into a tree `kymf` runs things from; the pre-existing exposure dominates
+and is not created by this change. Worth knowing before `syncOwnership` or an
+untrusted peer is ever contemplated.
+
+### Ownership is local, and the daemon needs CAP_FOWNER to live with it
+
+Because ownership never replicates, each node's copy is owned by whoever wrote
+it. Anything arriving over the wire is `stsync`; anything authored on the guest
+by the named user is `kymf`, group `dsfxn` via setgid, mode `0664`. Nothing
+about that reaches another node - a `kymf`-authored file lands on the next
+laptop owned by that laptop's Syncthing account, and on the NAS by the
+container uid.
+
+The cost is local. `chmod` and `utimensat` with explicit times need ownership
+or `CAP_FOWNER`, and the service runs with an empty effective capability set,
+so a permission change arriving for a path that happens to be `kymf`-owned
+fails and sticks in the same way as above. Upstream anticipated this: the unit
+ships `CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER` while leaving
+`AmbientCapabilities` empty, scoping the capability without granting it. The
+drop-in grants `AmbientCapabilities=CAP_FOWNER` and deliberately not
+`CAP_CHOWN`, which is what keeps the paragraph above true.
+
+The same ownership split is what makes git refuse every repository in the
+share - the working tree is group-writable, but the repository is `stsync`'s.
+`/etc/gitconfig` carries `safe.directory = /srv/dsfxn/share/*` for that, scoped
+to the share rather than the blanket `*`.
 
 The Windows nodes keep Ignore Permissions set on their copy, which is what
 Syncthing recommends, because the alternative is Windows synthesising Unix
@@ -459,6 +523,56 @@ upgrades belong to the image, and the packaged binary is a `[noupgrade]` build
 anyway. The payload `.deb` filename is the version pin; bumping it is a
 deliberate act of replacing the file. Keep all three Linux nodes on one version
 (the hub container tag is pinned to match) and move one node at a time.
+
+**Applying the setgid fix to an already-imaged guest**: guests imaged before
+the `RestrictSUIDSGID=false` / `AmbientCapabilities=CAP_FOWNER` drop-in carry
+the deadlock described in Permission replication, and show it as a `pullErrors`
+count in the thousands that never falls while `needFiles` sits at 0. Linux
+guests only - the hub container has no systemd sandbox and Windows nodes ignore
+permissions. Re-imaging fixes it too; this is the same change applied by hand.
+
+The node's data disk must be unlocked and the repository copy must have synced
+first. Confirm that before touching anything - if the count is `0` the node has
+not received the change yet, and the answer is to wait, not to hand-edit:
+
+```bash
+cd /srv/dsfxn/share/10.dev/10.repos/gh-dsfxn/tech-vm/00.host-config/common
+grep -c 'RestrictSUIDSGID=false\|AmbientCapabilities=CAP_FOWNER' \
+  payload/extra_cfg/syncthing/data-disk.conf    # expect 2
+```
+
+Then install both files and restart. This is the same `install` the provisioner
+runs, so it is idempotent and safe to repeat:
+
+```bash
+sudo install -m 0644 payload/extra_cfg/syncthing/data-disk.conf \
+  /etc/systemd/system/syncthing@stsync.service.d/data-disk.conf
+sudo install -m 0644 payload/extra_cfg/gitconfig /etc/gitconfig
+sudo systemctl daemon-reload
+sudo systemctl restart syncthing@stsync.service
+```
+
+Three checks. The unit must report the overrides, the folder must drain, and
+git must stop refusing the share:
+
+```bash
+systemctl show syncthing@stsync.service -p RestrictSUIDSGID -p AmbientCapabilities
+# expect RestrictSUIDSGID=no  AmbientCapabilities=cap_fowner
+
+KEY=$(sudo grep -oP '(?<=<apikey>)[^<]+' /srv/dsfxn/.platform/syncthing/config.xml | head -1)
+curl -s -H "X-API-Key: $KEY" 'http://127.0.0.1:8384/rest/db/status?folder=wqa6q-yhpjx' \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print("pullErrors=%d needDirs=%d state=%s"%(d["pullErrors"],d["needDirectories"],d["state"]))'
+# expect pullErrors=0 needDirs=0, after a full scan cycle
+
+git -C /srv/dsfxn/share/10.dev/10.repos/gh-dsfxn/tech-vm status --short
+# expect no "dubious ownership"
+```
+
+The drain is not instant on a large tree: the directories are re-handled on the
+next scan, so allow a cycle before reading the count as a failure. Measured on
+`xd00-lde-0030`, 1806 stuck directories cleared to 0 within a few minutes of the
+restart, with no directory modes changed - the `2775` count was identical
+before and after, which is the point. The bit was never wrong, only forbidden.
 
 **Monitoring**: `sync-node status` reports folder state and connected peers;
 the hub's GUI shows the estate; an alarm can poll `/rest/db/status` on the hub

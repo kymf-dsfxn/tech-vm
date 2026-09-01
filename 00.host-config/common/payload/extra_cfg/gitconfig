@@ -1,0 +1,20 @@
+# /etc/gitconfig
+#
+# System-wide git settings for the platform guest. Installed by
+# guest-install.sh.
+
+# The share holds the working repositories and nothing in it is owned by the
+# person editing it: everything arriving over Syncthing lands owned by stsync,
+# because ownership never replicates (capability.data-synchronisation.md,
+# "Permission replication"). Git's dubious-ownership check then refuses every
+# repository under the share for the named user - the working tree is writable
+# through group dsfxn, but git will not look at it.
+#
+# The trailing /* form covers repositories at any depth below the share
+# without the blanket '*', which would exempt every repository on the node
+# including any unpacked from an untrusted archive.
+#
+# This is an exemption from a check, not a grant: it says the share's contents
+# are as trustworthy as the accounts on the encrypted disk, which they are.
+[safe]
+	directory = /srv/dsfxn/share/*

@@ -356,6 +356,8 @@ def cmd_unlock():
         info(f"{DATA_LUKS_NAME} already open")
     else:
         log(f"Open {DATA_PART} as {DATA_LUKS_NAME}")
+        # stdin left inherited: cryptsetup reads a non-tty stdin's first line as
+        # the passphrase, which is how a non-interactive caller unlocks.
         run_or_exit(["cryptsetup", "open", DATA_PART, DATA_LUKS_NAME])
 
     if is_mounted():
@@ -425,6 +427,18 @@ def _row(label, value):
     print(f"  {label:<12} {value}")
 
 
+# Distinct per state so a caller (e.g. login tooling) can act on the state
+# without parsing text; `unlocked` stays 0 for plain shell truthiness.
+STATUS_EXIT_CODES = {
+    "unlocked": 0,
+    "locked": 1,
+    "opened": 2,
+    "uninitialised": 3,
+    "absent": 4,
+    "unknown": 5,
+}
+
+
 def cmd_status():
     state = disk_state()
 
@@ -437,7 +451,7 @@ def cmd_status():
             "absent": f"data disk: {DATA_DEV} not attached",
             "unknown": "data disk: state needs root - sudo data-disk status",
         }[state])
-        return
+        return STATUS_EXIT_CODES[state]
 
     _row("namespace", NAMESPACE)
     _row("state", state)
@@ -462,6 +476,8 @@ def cmd_status():
 
     for service in DATA_DISK_SERVICES:
         _row(service, capture(["systemctl", "is-active", service]))
+
+    return STATUS_EXIT_CODES[state]
 
 
 # -- Dispatch --------------------------------------------------------------------
@@ -493,8 +509,8 @@ def main(argv):
     if command not in commands:
         usage(sys.stderr)
         die(f"Unknown command: {command}")
-    commands[command]()
-    return 0
+    result = commands[command]()
+    return result if result is not None else 0
 
 
 if __name__ == "__main__":

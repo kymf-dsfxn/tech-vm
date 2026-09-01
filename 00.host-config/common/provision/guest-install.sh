@@ -288,6 +288,23 @@ EOF
         ln -s libncurses.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5
         info "Linked libncurses.so.5 -> libncurses.so.6 for dbisqlc"
     fi
+
+    # Register the ODBC driver with unixODBC so pyodbc (and any DSN-less
+    # DRIVER={...} connection string) resolves it without a manual odbcinst
+    # step per VM. "SQL Anywhere 16" is an alias the migration-project's
+    # extraction scripts need when invoking with --driver; it is just a label in
+    # odbcinst.ini, not tied to the bundle's actual SQLANY_VER.
+    ODBC_DRIVER_DEF="$(mktemp)"
+    cat > "${ODBC_DRIVER_DEF}" <<EOF
+[SQL Anywhere 16]
+Driver=${SQLANY_HOME}/lib64/libdbodbc${SQLANY_VER}_r.so
+Setup=${SQLANY_HOME}/lib64/libdbodbcinst${SQLANY_VER}_r.so
+FileUsage=1
+EOF
+    odbcinst -i -d -f "${ODBC_DRIVER_DEF}"
+    rm -f "${ODBC_DRIVER_DEF}"
+    info "Registered ODBC driver 'SQL Anywhere 16' -> ${SQLANY_HOME}/lib64/libdbodbc${SQLANY_VER}_r.so"
+
     info "SAP SQL Anywhere client at ${SQLANY_HOME}"
 else
     info "No SAP SQL Anywhere client tarball in payload, skipping"
@@ -367,6 +384,13 @@ if [[ -n "${SYNCTHING_DEB}" ]]; then
 else
     info "No Syncthing .deb in payload, skipping"
 fi
+
+# --- Git: trust the share ----------------------------------------------------
+# Repositories in the share are owned by stsync, not by the person editing
+# them, so git's dubious-ownership check refuses all of them. Rationale in the
+# file itself; capability.data-synchronisation.md, "Permission replication".
+log "Install system gitconfig"
+install -m 0644 "${PAYLOAD_CFG}/gitconfig" /etc/gitconfig
 
 # --- Data disk lifecycle command ---------------------------------------------
 # Never unlocked at boot: no crypttab, noauto fstab. The fstab entry is written

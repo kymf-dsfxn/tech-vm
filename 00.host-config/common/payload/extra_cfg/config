@@ -2,12 +2,49 @@
 Host github-dsfxn
     HostName github.com
     User git
-    IdentityFile ~/.ssh/kymf.disfixian-github.id_ed25519
+    IdentityFile /srv/dsfxn/share/00.kymf/security-keys/ssh/kymf/kymf.disfixian-github.id_ed25519
     IdentitiesOnly yes
 
 # Repo qfree
 Host github-qf
     HostName github.com
     User git
-    IdentityFile ~/.ssh/id_eddsa.kym.farrell@q-free.com.openssh-private
+    IdentityFile /srv/dsfxn/share/02.clients/qf/security-keys/ssh/qfree-git/id_eddsa.kym.farrell@q-free.com.openssh-private
     IdentitiesOnly yes
+
+# Repo tieto
+Host github-tb
+    HostName github.com
+    User git
+    IdentityFile /srv/dsfxn/share/02.clients/tb/security-keys/ssh/tb-git/kymf.tb-github.id_ed25519
+    IdentitiesOnly yes
+
+# Tunnels
+# Combined SOCKS + fixed tunnels
+# Windows Version not using Quality of life bits
+# ssh cosng-tunnel
+Host cosng-tunnel
+    HostName ssh.cosng.net
+    User e799118
+
+    # SOCKS proxy
+    DynamicForward 127.0.0.1:12345
+
+    # Static tunnels (ASE, IQ, PG)
+    LocalForward 127.0.0.1:44103 dat-aca-r-syb02.unix.cosng.net:4103
+    LocalForward 127.0.0.1:44110 dat-dbi-r-syb01.unix.cosng.net:4110
+    LocalForward 127.0.0.1:46500 pg-dbn-r-c02.unix.cosng.net:6500
+
+    # Reliability
+    ExitOnForwardFailure yes
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+
+    # Prevent interactive session
+    RequestTTY no
+    SessionType none
+
+#    # Optional quality-of-life
+#    ControlMaster auto
+#    ControlPath ~/.ssh/cm-%r@%h:%p
+#    ControlPersist 10m

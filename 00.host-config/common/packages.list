@@ -66,3 +66,11 @@ libpq-dev
 #                  other packages, so the non-wide runtime is named here for
 #                  the compat link guest-install.sh creates onto it.
 libncurses6
+#   unixodbc     - ODBC driver manager (libodbc.so.2); Python's pyodbc links
+#                  against this, not directly against the SAP driver.
+#   odbcinst     - the odbcinst CLI; a separate binary package from unixodbc
+#                  on this release, not pulled in as its dependency, but
+#                  guest-install.sh needs it to register the SQL Anywhere
+#                  driver into /etc/odbcinst.ini.
+unixodbc
+odbcinst

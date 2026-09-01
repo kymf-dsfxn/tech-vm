@@ -11,6 +11,9 @@ and is ported verbatim; deviations are listed in the port's commit message.
 - `status` runs without root; every other command requires root and says
   "needs root. Try: sudo data-disk <cmd>".
 - Exit codes: 0 success (including a skipped gated service), 1 on `die`.
+  `status` (and `status --brief`) instead exits per disk state, so login
+  tooling can act on it without parsing text: `unlocked`=0, `locked`=1,
+  `opened`=2, `uninitialised`=3, `absent`=4, `unknown`=5.
 - States: the six-word vocabulary in `platform_node.STATES`, classified
   observable-first.
 - Output prefixes: `==> ` (log), four spaces (info), `    WARNING: ` to
