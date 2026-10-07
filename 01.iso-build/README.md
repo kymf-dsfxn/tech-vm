@@ -21,7 +21,7 @@ cache.
 # 1. Fetch the package closure into an offline repo (needs docker or podman)
 ./scripts/build-package-repo.sh
 
-# 2. Fetch the standalone build tools (syft, shfmt, uv; needs curl, tar, sha256sum)
+# 2. Fetch the standalone build tools (syft, shfmt, uv, d2; needs curl, tar, sha256sum)
 ./scripts/fetch-build-tools.sh
 
 # 3. Build a host ISO (hosts are the <host>/ directories in 00.host-config)
@@ -47,7 +47,7 @@ repository artefact without touching anything downstream.
 
 ## Standalone build tools
 
-syft, shfmt and uv are not in apt, so they cannot come from the offline repo.
+syft, shfmt, uv and d2 are not in apt, so they cannot come from the offline repo.
 `fetch-build-tools.sh` downloads them with checksum verification into
 `.cache/build-tools/bin`; syft and shfmt are pinned to the exact version and
 sha256 the sdlc build images use. The ISO carries the tree, and

@@ -115,12 +115,16 @@ at every peer.
 
 ## Layout and ownership
 
-Two directories on the mounted filesystem, created by `data-disk` and nothing
-else:
+Three directories on the mounted filesystem, created by `data-disk` and
+nothing else:
 
 - `/srv/dsfxn/share`, `2775 dsfxn:dsfxn` - what replicates and what SMB serves.
 - `/srv/dsfxn/.platform`, `0750 root:dsfxn` - each consumer's own state,
   invisible over SMB.
+- `/srv/dsfxn/podman-storage`, `0755 kymf:kymf` - the named user's podman
+  graphroot (`~/.config/containers/storage.conf`, written by
+  `guest-install.sh`). Node-local, not replicated: it sits beside `share/`,
+  not inside it.
 
 `init` creates them on the provably new filesystem; `unlock` re-asserts them.
 No consumer command may create the share: a command that can conjure an empty

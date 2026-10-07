@@ -97,6 +97,7 @@ class PlatformEnvTests(unittest.TestCase):
         self.assertEqual(d["share"], "/srv/dsfxn/share")
         self.assertEqual(d["luks_name"], "dsfxn_data")
         self.assertEqual(d["named_user"], "kymf")
+        self.assertEqual(d["podman_storage"], "/srv/dsfxn/podman-storage")
 
     def test_fallbacks_match_the_bash_consumers(self):
         path = self._write(
@@ -108,6 +109,7 @@ class PlatformEnvTests(unittest.TestCase):
         self.assertEqual(d["state_dir"], "/srv/dsfxn/.platform")
         self.assertEqual(d["sync_user"], "stsync")
         self.assertEqual(d["named_user"], "kymf")
+        self.assertEqual(d["podman_storage"], "/srv/dsfxn/podman-storage")
 
     def test_missing_file_is_fatal(self):
         with self.assertRaises(pn.PlatformEnvError):

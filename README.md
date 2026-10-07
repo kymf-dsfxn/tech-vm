@@ -28,3 +28,14 @@ document - the rationale lives there, not in READMEs or code comments:
 - `capability.host-data-access.md` - data between host and guest: the guest
   serves its share over SMB, and reads the host drives over HGFS at
   /mnt/C, /mnt/X, /mnt/S.
+
+Two more capabilities define what the built VM is for as a development
+machine:
+
+- `capability.db-development-ase.md` - C, Python and command-line development
+  against SAP ASE: Open Client (`isql`, `bcp`, CT-Lib), the ODBC driver
+  registration pyodbc rides on, and the environment contract.
+- `capability.db-development-iq.md` - C, Python, JDBC and command-line
+  development against SAP IQ: the SQL Anywhere client layer, the IQ network
+  client (`dbisql`, `iqdsn`) with its bundled SAPJRE, sacapi, sqlanydb and
+  jConnect.

@@ -11,10 +11,14 @@
 #   1. every name in packages.list still resolves on the target release
 #   2. the SAP stanzas in guest-install.sh run, taken verbatim from that file
 #      rather than copied here, so this test fails when that file drifts
-#   3. isql, bcp, dbisqlc, dbping and psql run from a login shell
+#   3. isql, bcp, dbisqlc, dbping, dbisql, iqdsn and psql run from a login
+#      shell, and the tools both SAP bundles ship keep resolving from
+#      /opt/sqlanywhere16 (PATH order)
 #   4. the three smoke clients compile and run against what step 2 installed
-#   5. odbcinst sees the driver the SQL Anywhere stanza registers, and
-#      libodbc.so.2 (what pyodbc actually links against) resolves
+#   5. odbcinst sees the drivers the SQL Anywhere and ASE ODBC stanzas
+#      register, the ASE driver loads and reaches a connect attempt through
+#      unixODBC, and libodbc.so.2 (what pyodbc actually links against)
+#      resolves
 #
 # Exit status is 0 only if every check passed.
 # =============================================================================
@@ -94,16 +98,17 @@ ls -la /opt/vm-init/extra_tgz
         'index($0,b)==1 {on=1} index($0,e)==1 {on=0} on' "${GUEST_INSTALL}"
 } > /tmp/stanzas.sh
 
-if grep -q 'ASE_TARBALL' /tmp/stanzas.sh && grep -q 'SQLANY_TARBALL' /tmp/stanzas.sh; then
-    ok "extracted both stanzas ($(wc -l < /tmp/stanzas.sh) lines)"
+if grep -q 'ASE_TARBALL' /tmp/stanzas.sh && grep -q 'ASE_ODBC_TARBALL' /tmp/stanzas.sh \
+    && grep -q 'SQLANY_TARBALL' /tmp/stanzas.sh && grep -q 'IQ_TARBALL' /tmp/stanzas.sh; then
+    ok "extracted all four stanzas ($(wc -l < /tmp/stanzas.sh) lines)"
 else
     bad "could not extract the SAP stanzas - have the section headers moved?"
 fi
 if bash /tmp/stanzas.sh; then ok "stanzas ran clean"; else bad "stanzas exited non-zero"; fi
 
 printf '\n--- what they wrote ---\n'
-cat /etc/profile.d/sap-ase.sh /etc/profile.d/sap-sqlanywhere.sh
-cat /etc/ld.so.conf.d/sap-ase.conf /etc/ld.so.conf.d/sap-sqlanywhere.conf
+cat /etc/profile.d/sap-ase.sh /etc/profile.d/sap-sqlanywhere.sh /etc/profile.d/sap-iq.sh
+cat /etc/ld.so.conf.d/sap-ase.conf /etc/ld.so.conf.d/sap-ase-odbc.conf /etc/ld.so.conf.d/sap-sqlanywhere.conf
 ls -l /usr/lib/x86_64-linux-gnu/libncurses.so.5
 
 # guest-install.sh reclaims the payload at the end; do the same, so the rest of
@@ -114,10 +119,12 @@ rm -rf /opt/vm-init/extra_tgz
 step "3. login shell environment and the command-line clients"
 # -----------------------------------------------------------------------------
 bash -lc 'echo "  SYBASE=$SYBASE  SYBASE_OCS=$SYBASE_OCS  SYBPLATFORM=$SYBPLATFORM"
-          echo "  SQLANY16=$SQLANY16"
+          echo "  SQLANY16=$SQLANY16  IQDIR16=$IQDIR16  SYBASE_JRE7_64=$SYBASE_JRE7_64"
           echo "  isql:    $(command -v isql)"
           echo "  bcp:     $(command -v bcp)"
           echo "  dbisqlc: $(command -v dbisqlc)"
+          echo "  dbisql:  $(command -v dbisql)"
+          echo "  iqdsn:   $(command -v iqdsn)"
           echo "  LD_LIBRARY_PATH (unset by design): [${LD_LIBRARY_PATH:-}]"'
 
 check "isql -v"       bash -lc 'isql -v > /dev/null 2>&1'
@@ -129,6 +136,26 @@ check_output "dbisqlc loads (ncurses compat link works)" 'Usage' \
 # Reaching "server not found" means the request went through the driver.
 check_output "dbping drives the SQL Anywhere client" 'Database server not found' \
     bash -lc 'dbping -c "uid=x;pwd=y;host=127.0.0.1:2638"'
+
+# The IQ bundle's tools. dbisql is the Java Interactive SQL console; it runs
+# headless under -nogui on the bundled SAPJRE, and reaching "server not found"
+# on a connect attempt means the whole Java-to-driver stack loaded.
+check_output "dbisql -nogui runs headless (bundled SAPJRE)" 'not connected' \
+    bash -lc 'dbisql -nogui -onerror exit "sql echo t"'
+check_output "dbisql connect attempt reaches the driver" 'Database server not found' \
+    bash -lc 'dbisql -nogui -c "uid=x;pwd=y;host=127.0.0.1:2638" "SELECT 1"'
+check_output "iqdsn runs" 'Data Source Utility' bash -lc 'iqdsn'
+check_output "iqsqlpp runs" 'Embedded SQL' bash -lc 'iqsqlpp'
+# SYBASE_JRE7_64 is the one variable dbisql needs: the launcher finds its own
+# jars and RPATH-resolved libraries, but not a JVM. This pins that claim.
+check_output 'dbisql runs on SYBASE_JRE7_64 alone (no LD_LIBRARY_PATH)' 'not connected' \
+    env -i TERM=xterm SYBASE_JRE7_64=/opt/sap/shared/SAPJRE-7_1_015_64BIT \
+    /opt/sap/IQ-16_0/bin64/dbisql -nogui -onerror exit 'sql echo t'
+# Both SAP bundles ship dbping/dbisqlc/dblocate/dbvalid; profile.d ordering
+# keeps the SQL Anywhere copies first, exactly as before the IQ bundle existed.
+check "dbping still resolves from /opt/sqlanywhere16 (PATH order)" \
+    bash -lc 'test "$(command -v dbping)" = "/opt/sqlanywhere16/bin64/dbping"'
+
 
 # -----------------------------------------------------------------------------
 step "4. CT-Lib: smoke client + the vendor sample"
@@ -174,6 +201,11 @@ check "sa_smoke builds" bash -lc 'cd /tmp/build &&
 check "sa_smoke runs" bash -lc /tmp/build/sa_smoke
 check 'sa_smoke runs on $SQLANY16 alone' \
     env -i SQLANY16=/opt/sqlanywhere16 /tmp/build/sa_smoke
+# The same C API is what Python's sqlanydb driver loads, by this exact name,
+# through plain dlopen - so this one line is the whole Python-to-IQ story:
+# the library resolves from ld.so.conf.d with no environment at all.
+check "libdbcapi_r.so resolves (sqlanydb's load target)" \
+    bash -lc 'python3 -c "import ctypes; ctypes.CDLL(\"libdbcapi_r.so\")"'
 
 # -----------------------------------------------------------------------------
 step "7. ODBC driver registration (unixODBC / pyodbc)"
@@ -182,6 +214,36 @@ check_output "odbcinst -q -d lists the SQL Anywhere driver" 'SQL Anywhere 16' \
     odbcinst -q -d
 check "libodbc.so.2 resolves (pyodbc's link target)" \
     bash -lc 'python3 -c "import ctypes; ctypes.CDLL(\"libodbc.so.2\")"'
+
+check_output "odbcinst -q -d lists the ASE driver" 'Adaptive Server Enterprise' \
+    odbcinst -q -d
+ASE_ODBC_SO=/opt/sap/DataAccess64/ODBC/lib/libsybdrvodb.so
+check "ASE ODBC driver has no unresolved dependencies" \
+    bash -c "! ldd ${ASE_ODBC_SO} | grep -q 'not found'"
+check_output "odbcversion runs (resolves the driver by soname, no LD_LIBRARY_PATH)" '^16\.' \
+    env -i /opt/sap/DataAccess64/bin/odbcversion -version
+# Drive the registered name through unixODBC itself, as pyodbc would. Nothing
+# listens on port 1, so the connect must fail - but with a network error from
+# the driver. "Can't open lib" / "file not found" means the registration or the
+# library is broken, which is what this guards.
+check "unixODBC loads 'Adaptive Server Enterprise' and reaches the connect" \
+    python3 /dev/stdin <<'PYEOF'
+import ctypes, sys
+odbc = ctypes.CDLL("libodbc.so.2")
+h = ctypes.c_void_p()
+odbc.SQLAllocHandle(1, None, ctypes.byref(h))
+odbc.SQLSetEnvAttr(h, 200, ctypes.c_void_p(3), 0)
+dbc = ctypes.c_void_p()
+odbc.SQLAllocHandle(2, h, ctypes.byref(dbc))
+cs = b"DRIVER={Adaptive Server Enterprise};NetworkAddress=127.0.0.1,1;UID=x;PWD=x"
+rc = odbc.SQLDriverConnect(dbc, None, cs, len(cs), None, 0, None, 0)
+state, msg = ctypes.create_string_buffer(6), ctypes.create_string_buffer(1024)
+native, n = ctypes.c_int(), ctypes.c_short()
+odbc.SQLGetDiagRec(2, dbc, 1, state, ctypes.byref(native), msg, 1024, ctypes.byref(n))
+text = msg.value.decode(errors="replace")
+print(f"  rc={rc} state={state.value.decode()} msg={text}")
+sys.exit(0 if rc != 0 and "Can't open lib" not in text and "file not found" not in text else 1)
+PYEOF
 
 # -----------------------------------------------------------------------------
 step "8. installed footprint"

@@ -167,7 +167,7 @@ chmod 0755 "${VM_INIT_STAGE}/guest-install.sh" \
 # Offline apt repo
 cp -a "${APT_REPO_DIR}" "${VM_INIT_STAGE}/apt-repo"
 
-# Standalone build tools (syft, shfmt, uv) fetched by fetch-build-tools.sh
+# Standalone build tools (syft, shfmt, uv, d2) fetched by fetch-build-tools.sh
 cp -a "${BUILD_TOOLS_DIR}" "${VM_INIT_STAGE}/build-tools"
 
 # Build metadata (identity + assembly timestamp)

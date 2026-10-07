@@ -23,11 +23,23 @@ throws the container away. No ISO, no VM, no root on the host.
    headers are renamed, extraction finds nothing and the test fails rather
    than quietly passing on an empty script.
 3. **The command-line clients run** from a login shell: `isql`, `bcp`,
-   `dbisqlc`, `dbping`, `psql`. `dbping` is checked as far as *Database server
-   not found*, which means the request reached the driver.
+   `dbisqlc`, `dbping`, `dbisql`, `iqdsn`, `iqsqlpp`, `psql`. `dbping` is
+   checked as far as *Database server not found*, which means the request
+   reached the driver, and `dbisql -nogui` is driven to the same error, which
+   means the whole Java-to-driver stack loaded on the bundled SAPJRE. Tools
+   that both SAP bundles ship are asserted to still resolve from
+   `/opt/sqlanywhere16` - the IQ bundle must add tools, not change which copy
+   of the shared ones runs.
 4. **The three smoke clients compile and run** against what step 2 installed -
    plus the vendor's own `firstapp` sample, built by its own makefile,
    unmodified and with `-Werror`.
+5. **ODBC works through unixODBC.** Both drivers are registered
+   (`odbcinst -q -d`), the ASE driver has no unresolved dependencies,
+   `odbcversion` runs under `env -i`, and a connect attempt to a closed port
+   through `DRIVER={Adaptive Server Enterprise}` fails with the driver's own
+   "no server listening" error rather than "Can't open lib". That last check is
+   what catches a broken registration or library path without needing an ASE
+   server.
 
 Between steps 2 and 3 it deletes `/opt/vm-init/extra_tgz`, exactly as
 `guest-install.sh` does at the end, so nothing downstream can pass on a file
@@ -49,7 +61,10 @@ That is not pedantry: it pins down the split between the libraries, which
 resolve from `ld.so.conf.d` with no `LD_LIBRARY_PATH` anywhere, and `$SYBASE` /
 `$SQLANY16`, which the runtimes read for themselves and which only
 `/etc/profile.d` supplies. A systemd unit running one of these would need them
-set explicitly.
+set explicitly. The same discipline is applied to `dbisql`, whose single
+variable is `SYBASE_JRE7_64`, and to `libdbcapi_r.so`, loaded by name through
+`ctypes` with no environment at all because that is exactly what Python's
+`sqlanydb` driver does.
 
 ## Known-unusable, by design
 

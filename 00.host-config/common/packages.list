@@ -18,23 +18,28 @@ locales
 
 # Developer toolchain
 git
+git-lfs
 openjdk-25-jdk-headless
 python3
 python3-build
 python3-venv
 apt-rdepends
 podman
+podman-docker
+catatonit
 uidmap
 passt
 xorriso
 build-essential
+librsvg2-bin
+
 #   pkg-config - how most C build systems locate libpq (libpq-dev ships
 #                libpq.pc); build-essential does not pull it in.
 pkg-config
 
 # Local-build toolchain: matches what the sdlc build images install, so the VM
 # can run full local builds of the code they cover. Non-apt tools (syft, shfmt,
-# uv) are pinned binaries staged by fetch-build-tools.sh, not listed here.
+# uv, d2) are pinned binaries staged by fetch-build-tools.sh, not listed here.
 python3-pip
 shellcheck
 
@@ -58,7 +63,7 @@ procps
 postgresql-client-18
 libpq-dev
 
-# SAP ASE / SQL Anywhere clients (unpacked from payload/extra_tgz, see
+# SAP ASE / SQL Anywhere / IQ clients (unpacked from payload/extra_tgz, see
 # guest-install.sh). The bundles are self-contained apart from one library:
 #   libncurses6  - dbisqlc, the SQL Anywhere character-mode client, is still
 #                  linked against the ncurses 5 soname. Ubuntu ships no

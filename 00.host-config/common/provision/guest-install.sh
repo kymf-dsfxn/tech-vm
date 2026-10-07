@@ -22,6 +22,7 @@ PAYLOAD_CFG="${VM_INIT_DIR}/extra_cfg"
 PAYLOAD_DEB="${VM_INIT_DIR}/extra_deb"
 PAYLOAD_TGZ="${VM_INIT_DIR}/extra_tgz"
 PAYLOAD_KEYS="${VM_INIT_DIR}/extra_keys"
+PAYLOAD_HOME="${VM_INIT_DIR}/extra_home"
 PACKAGES_LIST="${VM_INIT_DIR}/packages.list"
 BUILD_TOOLS_DIR="${VM_INIT_DIR}/build-tools"
 
@@ -171,6 +172,26 @@ install -m 0600 -o "${NAMED_USER}" -g "${NAMED_USER}" \
     "${PAYLOAD_KEYS}/${NAMED_USER}.pub" \
     "/home/${NAMED_USER}/.ssh/authorized_keys"
 
+# --- Home directory overlay (from payload) -----------------------------------
+# Verbatim copy onto the named user's home (dotfiles, tool config, skills);
+# cp -a keeps the payload's ownership, so fix it up after.
+log "Install home directory overlay for ${NAMED_USER}"
+if [[ -d "${PAYLOAD_HOME}" ]]; then
+    cp -a "${PAYLOAD_HOME}/." "/home/${NAMED_USER}/"
+    chown -R "${NAMED_USER}:${NAMED_USER}" "/home/${NAMED_USER}"
+    info "Overlaid $(find "${PAYLOAD_HOME}" -mindepth 1 -maxdepth 1 -printf '%f ')"
+else
+    info "No home directory overlay in payload, skipping"
+fi
+
+# --- $HOME/bin on PATH --------------------------------------------------------
+# Generic for any user with a ~/bin (the overlay above puts one under
+# ${NAMED_USER}), not just this named user; profile.d covers login shells.
+log "Add \$HOME/bin to PATH for login shells"
+printf 'if [ -d "$HOME/bin" ]; then\n    PATH="$HOME/bin:$PATH"\nfi\n' \
+    > /etc/profile.d/home-bin.sh
+chmod 0644 /etc/profile.d/home-bin.sh
+
 # --- JAVA_HOME ---------------------------------------------------------------
 log "Set JAVA_HOME"
 JAVA_HOME_DISCOVERED="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
@@ -256,6 +277,37 @@ else
     info "No SAP ASE client tarball in payload, skipping"
 fi
 
+# --- SAP ASE ODBC driver (from payload tarball) ------------------------------
+# The ASE ODBC driver is not part of OCS-*; it ships in the SDK's DataAccess64
+# tree, which the Open Client bundle above does not carry. Same constraint on
+# the prefix: it is rooted at ./sap and unpacks into /opt/sap beside the client.
+# The driver itself needs only libc/libstdc++, so unixODBC loads it by the
+# absolute path registered below; the ld.so entry exists for odbcversion, which
+# links against it by soname.
+log "Install SAP ASE ODBC driver"
+ASE_ODBC_TARBALL="$(find "${PAYLOAD_TGZ}" -maxdepth 1 -name 'sap.ase-odbc.*.tgz' | head -1)"
+if [[ -n "${ASE_ODBC_TARBALL}" ]]; then
+    tar -xzf "${ASE_ODBC_TARBALL}" --no-same-owner -C /opt
+    ASE_ODBC_LIB=/opt/sap/DataAccess64/ODBC/lib
+
+    printf '%s\n' "${ASE_ODBC_LIB}" > /etc/ld.so.conf.d/sap-ase-odbc.conf
+    chmod 0644 /etc/ld.so.conf.d/sap-ase-odbc.conf
+
+    # "Adaptive Server Enterprise" is the label the migration-project's ASE
+    # extraction scripts pass as their default --driver.
+    ASE_ODBC_DEF="$(mktemp)"
+    cat > "${ASE_ODBC_DEF}" <<EOF
+[Adaptive Server Enterprise]
+Driver=${ASE_ODBC_LIB}/libsybdrvodb.so
+FileUsage=1
+EOF
+    odbcinst -i -d -f "${ASE_ODBC_DEF}"
+    rm -f "${ASE_ODBC_DEF}"
+    info "Registered ODBC driver 'Adaptive Server Enterprise' -> ${ASE_ODBC_LIB}/libsybdrvodb.so"
+else
+    info "No SAP ASE ODBC tarball in payload, skipping"
+fi
+
 # --- SAP SQL Anywhere client + SDK (from payload tarball) --------------------
 # The client side of IQ: ODBC/JDBC drivers, the sacapi C API headers, and the
 # dbisqlc/dbping/dbdsn commands. Rooted at ./sqlanywhere16, and its sa_config.sh
@@ -310,13 +362,62 @@ else
     info "No SAP SQL Anywhere client tarball in payload, skipping"
 fi
 
-# Pick up whichever of the two ld.so.conf.d fragments were written above. The
-# one warning it emits is for lib3p64/libslcryptokernel.so.sha256, a checksum
-# sidecar the bundle keeps beside its library; it is not an ELF file and is
-# not meant to be loaded.
+# --- SAP IQ network client (from payload tarballs) ----------------------------
+# What the SQL Anywhere bundle above does not carry: dbisql (the Java
+# Interactive SQL console, the one that scripts IQ sensibly), iqdsn, iqsqlpp,
+# and the jConnect JDBC driver. Rooted at ./sap like the ASE bundles - the
+# vendor installs IQ-16_0 under $SYBASE - so it unpacks into /opt/sap beside
+# OCS-16_1 with no shared files (SYBASE.sh stays the ASE bundle's).
+#
+# Two deliberate absences. No ld.so.conf.d fragment: every native binary in
+# IQ-16_0/bin64 carries an RPATH to its own lib64, and that lib64 duplicates
+# the SQL Anywhere sonames already published from /opt/sqlanywhere16, so
+# publishing it would make ldconfig pick one bundle's libraries for the other's
+# tools. And dbisql does not run on the system openjdk: it needs the Java 7
+# extension mechanism (removed in Java 9), so the vendor's own SAPJRE rides
+# along in a second tarball and is referenced only via SYBASE_JRE7_64, never
+# put on PATH.
+log "Install SAP IQ network client"
+IQ_TARBALL="$(find "${PAYLOAD_TGZ}" -maxdepth 1 -name 'sap.iq-client.*.tgz' | head -1)"
+IQ_JRE_TARBALL="$(find "${PAYLOAD_TGZ}" -maxdepth 1 -name 'sap.iq-client-jre.*.tgz' | head -1)"
+if [[ -n "${IQ_TARBALL}" ]]; then
+    tar -xzf "${IQ_TARBALL}" --no-same-owner -C /opt
+    # IQDIR16 is the variable the vendor's own IQ-16_0.sh exports and the
+    # tools' documentation assumes; the directory name carries the release.
+    IQ_DIR="$(find /opt/sap -maxdepth 1 -name 'IQ-*' -printf '%f\n' | head -1)"
+    IQ_VER="${IQ_DIR#IQ-}"; IQ_VER="${IQ_VER%%_*}"
+
+    IQ_JRE_HOME=""
+    if [[ -n "${IQ_JRE_TARBALL}" ]]; then
+        tar -xzf "${IQ_JRE_TARBALL}" --no-same-owner -C /opt
+        IQ_JRE_HOME="$(find /opt/sap/shared -maxdepth 1 -name 'SAPJRE-*64BIT' -type d | head -1)"
+    fi
+
+    # PATH order is load-bearing: profile.d sources lexically, and every
+    # fragment prepends, so sap-sqlanywhere.sh (later) lands ahead of this one.
+    # The tools both bundles ship (dbisqlc, dbping, dblocate, dbvalid) keep
+    # resolving from /opt/sqlanywhere16 exactly as before this stanza existed;
+    # only the IQ-specific tools resolve from IQ-16_0/bin64.
+    cat > /etc/profile.d/sap-iq.sh <<EOF
+export IQDIR${IQ_VER}=/opt/sap/${IQ_DIR}
+EOF
+    if [[ -n "${IQ_JRE_HOME}" ]]; then
+        printf 'export SYBASE_JRE7_64=%s\n' "${IQ_JRE_HOME}" >> /etc/profile.d/sap-iq.sh
+    fi
+    printf 'export PATH="/opt/sap/%s/bin64:${PATH}"\n' "${IQ_DIR}" >> /etc/profile.d/sap-iq.sh
+    chmod 0644 /etc/profile.d/sap-iq.sh
+    info "SAP IQ network client at /opt/sap/${IQ_DIR}${IQ_JRE_HOME:+ (JRE ${IQ_JRE_HOME})}"
+else
+    info "No SAP IQ client tarball in payload, skipping"
+fi
+
+# Pick up whichever ld.so.conf.d fragments were written above. The warnings it
+# emits are for the libslcryptokernel.so.sha256 files (lib3p64 and the ODBC lib
+# dir), a checksum sidecar the bundles keep beside the library; it is not an ELF
+# file and is not meant to be loaded.
 ldconfig
 
-# --- Standalone build tools (syft, shfmt, uv) --------------------------------
+# --- Standalone build tools (syft, shfmt, uv, d2) -----------------------------
 # Not apt packages: fetched at ISO-build time by fetch-build-tools.sh, copied
 # straight into /usr/local/bin.
 log "Install standalone build tools"
@@ -324,7 +425,7 @@ if [[ -d "${BUILD_TOOLS_DIR}/bin" ]]; then
     install -m 0755 "${BUILD_TOOLS_DIR}/bin/"* /usr/local/bin/
     info "Installed: $(find "${BUILD_TOOLS_DIR}/bin" -maxdepth 1 -type f -printf '%f ' 2>/dev/null)"
 else
-    info "No build-tools payload, skipping (syft/shfmt/uv will be absent)"
+    info "No build-tools payload, skipping (syft/shfmt/uv/d2 will be absent)"
 fi
 
 # --- Rootless podman socket (Docker-API compatibility) -----------------------
@@ -344,6 +445,26 @@ if [[ -f /usr/lib/systemd/user/podman.socket ]]; then
 else
     info "podman.socket unit not found, skipping"
 fi
+
+# --- Podman storage relocated onto the platform data root --------------------
+# graphroot on the encrypted disk, not the OS disk: image/layer churn does not
+# belong on the root filesystem, and keeping it beside share/ rather than
+# inside it keeps it off Syncthing too. The directory itself is created by
+# `data-disk init`/`unlock` once the disk is a real filesystem, not here -
+# podman has no usable storage until the operator unlocks the data disk.
+log "Point ${NAMED_USER}'s podman storage at the data disk"
+install -d -m 0755 -o "${NAMED_USER}" -g "${NAMED_USER}" "/home/${NAMED_USER}/.config"
+install -d -m 0755 -o "${NAMED_USER}" -g "${NAMED_USER}" "/home/${NAMED_USER}/.config/containers"
+NAMED_USER_UID="$(id -u "${NAMED_USER}")"
+cat > "/home/${NAMED_USER}/.config/containers/storage.conf" <<EOF
+[storage]
+driver = "overlay"
+runroot = "/run/user/${NAMED_USER_UID}/containers"
+graphroot = "${PLATFORM_DATA_ROOT}/podman-storage"
+EOF
+chown "${NAMED_USER}:${NAMED_USER}" "/home/${NAMED_USER}/.config/containers/storage.conf"
+chmod 0644 "/home/${NAMED_USER}/.config/containers/storage.conf"
+info "storage.conf: graphroot=${PLATFORM_DATA_ROOT}/podman-storage runroot=/run/user/${NAMED_USER_UID}/containers"
 
 # --- Company CA (from payload .deb) ------------------------------------------
 log "Install company CA certificate"
@@ -391,6 +512,11 @@ fi
 # file itself; capability.data-synchronisation.md, "Permission replication".
 log "Install system gitconfig"
 install -m 0644 "${PAYLOAD_CFG}/gitconfig" /etc/gitconfig
+
+# The install above replaces /etc/gitconfig whole, taking git-lfs's own
+# postinst stanza with it; --system puts the filter back there, --skip-repo
+# because no repo exists yet in this chroot.
+git lfs install --system --skip-repo
 
 # --- Data disk lifecycle command ---------------------------------------------
 # Never unlocked at boot: no crypttab, noauto fstab. The fstab entry is written

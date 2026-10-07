@@ -66,6 +66,7 @@ def derived(env):
         "data_root": data_root,
         "share": env.get("PLATFORM_DATA_SHARE") or f"{data_root}/share",
         "state_dir": env.get("PLATFORM_DATA_STATE") or f"{data_root}/.platform",
+        "podman_storage": f"{data_root}/podman-storage",
         "core_user": env["PLATFORM_CORE_USER"],
         "sync_user": env.get("PLATFORM_SYNC_USER") or "stsync",
         "named_user": env.get("PLATFORM_NAMED_USER") or "kymf",

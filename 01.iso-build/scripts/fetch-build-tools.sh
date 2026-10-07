@@ -2,11 +2,11 @@
 #
 # fetch-build-tools.sh
 #
-# Fetch the standalone build tools the guest cannot get from apt: syft, shfmt
-# and uv. Each download is checksum-verified and staged under
+# Fetch the standalone build tools the guest cannot get from apt: syft, shfmt,
+# uv and d2. Each download is checksum-verified and staged under
 # .cache/build-tools/bin (git-ignored, not committed).
 #
-# syft and shfmt refetch only when their pins below change. uv defaults to
+# syft, shfmt and d2 refetch only when their pins below change. uv defaults to
 # "latest", resolved at run time, so a rerun can change the staged uv unless
 # --uv-version pins it.
 #
@@ -37,6 +37,12 @@ SYFT_URL="https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syf
 SHFMT_VERSION="3.10.0"
 SHFMT_SHA256="1f57a384d59542f8fac5f503da1f3ea44242f46dff969569e80b524d64b71dbc"
 SHFMT_URL="https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64"
+
+# d2: the diagramming CLI. Standalone release tarball; only bin/d2 out of it
+# is staged, the Makefile-based install is not needed for a single static binary.
+D2_VERSION="v0.9.0"
+D2_SHA256="5669ddc46b99e942cc96078f4a4e36d5e62103348f4c05179ede27802fdd87a9"
+D2_URL="https://github.com/d2lang/d2/releases/download/${D2_VERSION}/d2-${D2_VERSION}-linux-amd64.tar.gz"
 
 # uv: version resolved at build time unless pinned; integrity checked against
 # the release-published .sha256 sidecar.
@@ -90,6 +96,13 @@ curl -fsSL "${SHFMT_URL}" -o "${BIN_ABS}/shfmt"
 verify_sha "${BIN_ABS}/shfmt" "${SHFMT_SHA256}"
 chmod 0755 "${BIN_ABS}/shfmt"
 
+# --- d2 ----------------------------------------------------------------------
+_cprint 6 "Fetching d2 ${D2_VERSION}"
+curl -fsSL "${D2_URL}" -o "${TMP_DIR}/d2.tar.gz"
+verify_sha "${TMP_DIR}/d2.tar.gz" "${D2_SHA256}"
+tar -xzf "${TMP_DIR}/d2.tar.gz" -O "d2-${D2_VERSION}/bin/d2" > "${BIN_ABS}/d2"
+chmod 0755 "${BIN_ABS}/d2"
+
 # --- uv --------------------------------------------------------------------
 if [[ "${UV_VERSION}" == "latest" ]]; then
   # Resolve the newest tag from the releases/latest redirect (no GitHub API).
@@ -118,6 +131,7 @@ chmod 0755 "${BIN_ABS}/uv" "${BIN_ABS}/uvx"
   printf 'tool\tversion\tsha256\n'
   printf 'syft\t%s\t%s\n'  "${SYFT_VERSION}"  "${SYFT_SHA256}"
   printf 'shfmt\t%s\t%s\n' "${SHFMT_VERSION}" "${SHFMT_SHA256}"
+  printf 'd2\t%s\t%s\n'    "${D2_VERSION}"    "${D2_SHA256}"
   printf 'uv\t%s\t%s\n'    "${UV_VERSION}"    "${UV_SHA256}"
 } > "${MANIFEST}"
 

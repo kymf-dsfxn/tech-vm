@@ -47,9 +47,12 @@ common/
       syncthing/               node-config.xml.template and the syncthing@
                                data-disk.conf drop-in.
     extra_deb/                 Company CA and Syncthing .debs.
-    extra_tgz/                 Maven, Liquibase, and the SAP ASE and SQL
-                               Anywhere client bundles.
+    extra_tgz/                 Maven, Liquibase, and the SAP ASE client, ASE
+                               ODBC driver and SQL Anywhere client bundles.
     extra_keys/                Public keys (kymf.pub).
+    extra_home/                Verbatim overlay onto the named user's home.
+                               Currently .claude/skills/kymf-expression and
+                               bin/ (git-ds.* scripts, put on PATH).
 <host>/
   autoinstall/user-data        Autoinstall control. Per-host network and identity.
   autoinstall/meta-data        instance-id and local-hostname.
@@ -151,6 +154,12 @@ the repo root, and the rationale lives there:
   of absence; `guest-install.sh` writes the fstab block, and `host-drives`
   reports why a share is not there). The host reads the guest share over SMB,
   covered by the datadisk document.
+- **`../capability.db-development-ase.md`** and
+  **`../capability.db-development-iq.md`** - what the SAP client bundles and
+  the ODBC registrations below add up to: a developer can build and run C,
+  Python and command-line work against ASE and IQ on a fresh VM with nothing
+  to install. The bundle mechanics live in this README; the capability
+  documents own the contract.
 
 On a new guest the first `data-disk unlock` starts nothing, and says so. That
 is the node reporting that it is not set up yet, not a fault.
@@ -172,8 +181,10 @@ so the manifest can still answer "which Syncthing is on this VM".
 
 ## The SAP client bundles
 
-`extra_tgz/sap.ase-client.16.tgz` and `extra_tgz/sap.sql-anywhere-client.16.tgz`
-are self-contained trees, unpacked by `guest-install.sh` into `/opt`. The prefix
+`extra_tgz/sap.ase-client.16.tgz`, `extra_tgz/sap.sql-anywhere-client.16.tgz`
+and `extra_tgz/sap.iq-client.16.tgz` (with its companion
+`sap.iq-client-jre.7.tgz`) are self-contained trees, unpacked by
+`guest-install.sh` into `/opt`. The prefix
 is not a choice: `sap/SYBASE.sh` hard-codes `SYBASE=/opt/sap` and
 `sqlanywhere16/bin64/sa_config.sh` hard-codes `SQLANY16=/opt/sqlanywhere16`, so
 they go to `/opt` or nowhere. `SYBASE_OCS` is read off the bundle rather than
@@ -201,7 +212,82 @@ needed - jConnect is the likely candidate, if anything here ever talks JDBC.
 
 `tests/db-clients/run.sh` is what proves all of this still holds.
 
+### ASE ODBC driver bundle
+
+`extra_tgz/sap.ase-odbc.16.tgz` is a third, separate bundle, rooted at `./sap`
+so it unpacks into `/opt/sap` beside the client. The ASE ODBC driver is not part
+of `OCS-*`: the vendor ships it in the SDK's `DataAccess64` tree, which the
+repacked client bundle above does not carry.
+
+It is cut from `SDK.16.1.SP00.PL02.linuxamd64161002.TGZ` (the SDK installer
+image, ODBC component 16.1.000.0200), not from the ASE server bundle, whose
+ODBC component is the older 16.0 SP02 PL07. It holds:
+
+- `DataAccess64/ODBC/lib/libsybdrvodb.so`, the SQLLEN=8 build (the SDK names it
+  `libsybdrvodb-sqllen8.so` and installs it under the plain name), which is the
+  one that matches unixODBC's 8-byte `SQLLEN`;
+- the crypto libraries it loads for SSL (`libsapcrypto`, `libsapssfs`,
+  `libslcryptokernel` and its `.sha256`) and `locales/*/sybdrv.lcu`;
+- `DataAccess64/ODBC/include/sybasesqltypes.h` and `DataAccess64/bin/odbcversion`.
+
+Left out: the vendor's own driver manager (`dm/`, redundant with unixODBC) and
+the server-side stored procedures (`sp/`). The driver itself needs only libc,
+libstdc++ and friends, so unixODBC loads it by absolute path.
+
+To rebuild it, the driver is nested two archives deep in the installer image:
+`ebf31273/archives/odbc_mm/odbc.iam.zip` contains
+`conn_ase_odbc64.manifest_zg_ia_sf.jar`, which is a zip of the install tree.
+Extract that, copy the paths above under a `sap/` root, and
+`tar --sort=name --owner=0 --group=0 --numeric-owner -czf`.
+
+### IQ network client bundle
+
+`extra_tgz/sap.iq-client.16.tgz` is the IQ-specific layer the SQL Anywhere
+bundle does not carry: `dbisql` (the Java Interactive SQL console - the tool
+that scripts IQ properly, where `dbisqlc` is the deprecated C subset), `iqdsn`,
+`iqsqlpp`, the jConnect JDBC driver, and the `IQ-16_0` tree's own libraries and
+SDK (including the vendor's `sqlanydb` Python driver source under
+`sdk/python`). It is rooted at `./sap` because the vendor installs `IQ-16_0`
+under `$SYBASE`; it shares no files with the ASE bundles - the IQ repack
+deliberately drops `SYBASE.sh`/`SYBASE.env`/`SYBASE.csh` so the ASE bundle's
+copies are never overwritten.
+
+It is cut from `IQNC160011P_18-20011248.TGZ` (SAP IQ Network Client 16.0 SP11
+PL18), which is an InstallAnywhere installer, not an archive: rebuild it by
+running the installer silently in a throwaway container
+(`./setup.bin -i silent -f <response file>` with `USER_INSTALL_DIR=/opt/sap`,
+`AGREE_TO_SAP_LICENSE=true` and the Typical feature list), then repacking
+`IQ-16_0`, `jConnect-7_0` and `ThirdPartyLegal` under a `sap/` root with
+`tar --sort=name --owner=0 --group=0 --numeric-owner -czf`. Dropped: the
+uninstaller, install registry and logs, the installer's own JRE, the 32-bit
+SAPJRE, the PHP extension builds in `lib64`, and the pre-16 ODBC compat
+sonames (`libdbodbc11.so`, `libdbodbc12.so`).
+
+`extra_tgz/sap.iq-client-jre.7.tgz` is the 64-bit SAPJRE from the same
+installer, split out only because client plus JRE together clear GitHub's
+100 MiB per-file limit. It is not optional decoration: `dbisql` needs the Java
+7 extension mechanism, which Java 9 removed, so the system openjdk-25 cannot
+run it (`ClassNotFoundException: sybase.isql.ISQLLoader`). The JRE is reached
+only through `SYBASE_JRE7_64` in `/etc/profile.d/sap-iq.sh` and is never on
+`PATH` - nothing else on the image runs on it.
+
+Unlike the other SAP bundles the IQ client gets **no `ld.so.conf.d` fragment**:
+every native binary in `IQ-16_0/bin64` carries an RPATH to its own `lib64`, and
+that `lib64` duplicates the SQL Anywhere sonames already published from
+`/opt/sqlanywhere16/lib64`. Publishing both would let ldconfig pick one
+bundle's libraries for the other's tools. For the same reason the tools both
+bundles ship (`dbisqlc`, `dbping`, `dblocate`, `dbvalid`) keep resolving from
+`/opt/sqlanywhere16`: profile.d fragments source lexically and each prepends,
+so `sap-sqlanywhere.sh` lands ahead of `sap-iq.sh` on `PATH`.
+
 ### ODBC (unixODBC / pyodbc)
+
+The ASE driver is registered with unixODBC as `Adaptive Server Enterprise`, the
+name the migration-project's ASE extraction scripts default `--driver` to. A
+pyodbc connection string can address the server either as
+`SERVER=<host>;PORT=<port>` or `NetworkAddress=<host>,<port>`, with no
+`interfaces` file needed. `/opt/sap/DataAccess64/ODBC/lib` is on the loader path
+(`ld.so.conf.d`) only so that `odbcversion` resolves the driver.
 
 The SQL Anywhere driver is also registered with unixODBC, under the alias
 `SQL Anywhere 16` (an odbcinst.ini label, not the actual `SQLANY_VER` of the

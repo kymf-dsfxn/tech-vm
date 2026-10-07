@@ -35,6 +35,7 @@ DATA_MOUNT = _D["data_root"]
 # consumer's own state. sync-node reads the same two values from the same file.
 DATA_SHARE = _D["share"]
 DATA_STATE_DIR = _D["state_dir"]
+DATA_PODMAN_STORAGE = _D["podman_storage"]
 DATA_OWNER = _D["core_user"]
 DATA_GROUP = _D["core_user"]
 DATA_MODE = "2775"
@@ -222,14 +223,18 @@ def ensure_data_mount_permissions():
     info(f"{DATA_MOUNT} perms {capture(['stat', '-c', '%U:%G %a', DATA_MOUNT])}")
 
 
-# The one place the share and state directories are created. sync-node
-# deliberately cannot: a command that can conjure an empty share can tell every
-# peer the share was emptied.
+# The one place the share, state and podman storage directories are created.
+# sync-node deliberately cannot: a command that can conjure an empty share can
+# tell every peer the share was emptied.
 def ensure_data_layout():
     run_or_exit(["install", "-d", "-o", DATA_OWNER, "-g", DATA_GROUP,
                  "-m", "2775", DATA_SHARE])
     run_or_exit(["install", "-d", "-o", "root", "-g", DATA_GROUP,
                  "-m", "0750", DATA_STATE_DIR])
+    # Podman's graphroot: owned by the named user, not the platform core user,
+    # since it is that user's own rootless podman storage, not shared state.
+    run_or_exit(["install", "-d", "-o", NAMED_USER, "-g", NAMED_USER,
+                 "-m", "0755", DATA_PODMAN_STORAGE])
 
 
 # Close down the bare mountpoint once the real filesystem is gone. Only safe
