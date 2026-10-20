@@ -4,6 +4,9 @@
   plan       Build host, at ISO assembly: what the ISO intends to install.
   apply      Guest, at install: what actually landed, per dpkg.
   firstboot  Guest, at first boot: data-disk state and Syncthing mechanism.
+  converge   Guest, any time: a running guest was brought up to a newer recipe
+             by guest-converge.sh. Appended to `converged`, never overwrites
+             `recipe`, which stays the version the image was built from.
 
 Identity/config live on the encrypted disk, unknowable at first boot, so
 they are recorded as null rather than guessed.
@@ -170,6 +173,19 @@ def cmd_firstboot(args):
     _write(manifest, args.out)
 
 
+def cmd_converge(args):
+    manifest = _load(args.out)
+    manifest.setdefault("converged", []).append({
+        "timestamp": _now(),
+        "recipe_version": args.version,
+        "packages": [
+            {"name": name, "version": _dpkg_version(name)}
+            for name in _read_packages(args.packages)
+        ],
+    })
+    _write(manifest, args.out)
+
+
 def _load(path):
     if path and os.path.isfile(path):
         with open(path, encoding="utf-8") as handle:
@@ -209,6 +225,12 @@ def main():
                               "than packages.list (repeatable)")
     p_apply.add_argument("--out", required=True)
     p_apply.set_defaults(func=cmd_apply)
+
+    p_cv = sub.add_parser("converge", help="guest: record a converge to a newer recipe")
+    p_cv.add_argument("--out", required=True)
+    p_cv.add_argument("--version", required=True, help="recipe version converged to")
+    p_cv.add_argument("--packages", required=True)
+    p_cv.set_defaults(func=cmd_converge)
 
     p_fb = sub.add_parser("firstboot", help="guest: record first-boot result")
     p_fb.add_argument("--out", required=True)

@@ -20,6 +20,12 @@ common/
     guest-firstboot.sh         First-boot provisioning: data disk detection,
                                SMB share. Non-interactive by design.
     vm-init-firstboot.service  Oneshot unit that runs guest-firstboot.sh once.
+    guest-converge.sh          Repo-only, not staged. Brings a running guest
+                               built from an older recipe up to this checkout:
+                               missing packages, the SAP/ODBC/JDBC stanzas cut
+                               out of guest-install.sh, the operator commands,
+                               and a `converged` entry in the manifest. Run
+                               `sudo guest-converge.sh [--dry-run]`.
     make-manifest.py           Builds the planned manifest and completes it.
   guest-bin/                   The operator command surface; every file here
                                lands in /usr/local/bin.
