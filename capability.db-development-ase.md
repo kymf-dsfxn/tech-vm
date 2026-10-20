@@ -91,6 +91,9 @@ bundle - see `capability.db-development-iq.md` - and speaks TDS to ASE as well
 as to IQ. It is pure Java and runs on the system openjdk-25, so Maven and
 Liquibase on the image can reach ASE over JDBC with
 `com.sybase.jdbc4.jdbc.SybDriver` and `jdbc:sybase:Tds:<host>:<port>`.
+Liquibase needs the jar on its own classpath, not Maven's, so the install
+links it into `/opt/liquibase/lib` - the reasoning is in
+`capability.db-development.pg.md`, "Liquibase ships no drivers".
 
 ## What is configuration, not image
 

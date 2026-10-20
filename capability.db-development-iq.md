@@ -113,7 +113,9 @@ packages; `sqlanydb` and `pyodbc` are venv installs.
 jConnect 7 is at `/opt/sap/jConnect-7_0` (`classes/jconn4.jar`). It is pure
 Java, runs on the system openjdk-25, and speaks TDS to both IQ and ASE -
 `com.sybase.jdbc4.jdbc.SybDriver`, `jdbc:sybase:Tds:<host>:<port>` - which is
-what Maven builds and Liquibase changelogs on the image use.
+what Maven builds and Liquibase changelogs on the image use. Liquibase reaches
+it through a link into `/opt/liquibase/lib`, for the reason set out in
+`capability.db-development.pg.md`, "Liquibase ships no drivers".
 
 ## What is configuration, not image
 

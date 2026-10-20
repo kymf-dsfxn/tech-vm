@@ -34,6 +34,7 @@ Host cosng-tunnel
     LocalForward 127.0.0.1:44103 dat-aca-r-syb02.unix.cosng.net:4103
     LocalForward 127.0.0.1:44110 dat-dbi-r-syb01.unix.cosng.net:4110
     LocalForward 127.0.0.1:46500 pg-dbn-r-c02.unix.cosng.net:6500
+    LocalForward 127.0.0.1:46501 pg-dbi-r-c02.unix.cosng.net:6500
 
     # Reliability
     ExitOnForwardFailure yes

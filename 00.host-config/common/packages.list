@@ -60,8 +60,12 @@ procps
 #   libpq-dev puts libpq-fe.h under /usr/include/postgresql, so C builds need
 #   `pkg-config --cflags libpq` or -I$(pg_config --includedir); a bare -lpq
 #   does not find the header.
+#   libpostgresql-jdbc-java - pgJDBC, as /usr/share/java/postgresql.jar.
+#                  Liquibase 5 ships no JDBC drivers at all, so guest-install.sh
+#                  links this into /opt/liquibase/lib.
 postgresql-client-18
 libpq-dev
+libpostgresql-jdbc-java
 
 # SAP ASE / SQL Anywhere / IQ clients (unpacked from payload/extra_tgz, see
 # guest-install.sh). The bundles are self-contained apart from one library:

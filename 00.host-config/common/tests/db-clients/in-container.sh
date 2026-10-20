@@ -9,13 +9,16 @@
 #
 # What it asserts, in the order a real install does it:
 #   1. every name in packages.list still resolves on the target release
-#   2. the SAP stanzas in guest-install.sh run, taken verbatim from that file
-#      rather than copied here, so this test fails when that file drifts
+#   2. the Liquibase and SAP stanzas in guest-install.sh run, taken verbatim
+#      from that file rather than copied here, so this test fails when that
+#      file drifts
 #   3. isql, bcp, dbisqlc, dbping, dbisql, iqdsn and psql run from a login
 #      shell, and the tools both SAP bundles ship keep resolving from
 #      /opt/sqlanywhere16 (PATH order)
 #   4. the three smoke clients compile and run against what step 2 installed
-#   5. odbcinst sees the drivers the SQL Anywhere and ASE ODBC stanzas
+#   5. the Liquibase CLI runs and resolves the pgJDBC and jConnect drivers the
+#      stanzas linked into /opt/liquibase/lib
+#   6. odbcinst sees the drivers the SQL Anywhere and ASE ODBC stanzas
 #      register, the ASE driver loads and reaches a connect attempt through
 #      unixODBC, and libodbc.so.2 (what pyodbc actually links against)
 #      resolves
@@ -39,7 +42,9 @@ SMOKE_DIR="${COMMON}/tests/db-clients"
 # The section of guest-install.sh this test drives. Both markers are the
 # literal section headers in that file; if either is renamed, extraction finds
 # nothing and this test fails rather than silently testing an empty script.
-STANZA_BEGIN='# --- SAP ASE Open Client'
+# It starts at Liquibase because the JDBC driver links at the far end of the
+# range need both Liquibase and the IQ bundle in place.
+STANZA_BEGIN='# --- Liquibase (from payload tarball)'
 STANZA_END='# --- Standalone build tools'
 
 FAIL=0
@@ -87,6 +92,7 @@ step "2. the SAP stanzas from guest-install.sh, run verbatim"
 # -----------------------------------------------------------------------------
 mkdir -p /opt/vm-init/extra_tgz
 cp "${COMMON}"/payload/extra_tgz/sap.*.tgz /opt/vm-init/extra_tgz/
+cp "${COMMON}"/payload/extra_tgz/liquibase-*.tar.gz /opt/vm-init/extra_tgz/
 ls -la /opt/vm-init/extra_tgz
 
 {
@@ -98,11 +104,12 @@ ls -la /opt/vm-init/extra_tgz
         'index($0,b)==1 {on=1} index($0,e)==1 {on=0} on' "${GUEST_INSTALL}"
 } > /tmp/stanzas.sh
 
-if grep -q 'ASE_TARBALL' /tmp/stanzas.sh && grep -q 'ASE_ODBC_TARBALL' /tmp/stanzas.sh \
-    && grep -q 'SQLANY_TARBALL' /tmp/stanzas.sh && grep -q 'IQ_TARBALL' /tmp/stanzas.sh; then
-    ok "extracted all four stanzas ($(wc -l < /tmp/stanzas.sh) lines)"
+if grep -q 'LIQUIBASE_TARBALL' /tmp/stanzas.sh && grep -q 'ASE_TARBALL' /tmp/stanzas.sh \
+    && grep -q 'ASE_ODBC_TARBALL' /tmp/stanzas.sh && grep -q 'SQLANY_TARBALL' /tmp/stanzas.sh \
+    && grep -q 'IQ_TARBALL' /tmp/stanzas.sh && grep -q 'JCONN_JAR' /tmp/stanzas.sh; then
+    ok "extracted all five stanzas ($(wc -l < /tmp/stanzas.sh) lines)"
 else
-    bad "could not extract the SAP stanzas - have the section headers moved?"
+    bad "could not extract the stanzas - have the section headers moved?"
 fi
 if bash /tmp/stanzas.sh; then ok "stanzas ran clean"; else bad "stanzas exited non-zero"; fi
 
@@ -208,7 +215,27 @@ check "libdbcapi_r.so resolves (sqlanydb's load target)" \
     bash -lc 'python3 -c "import ctypes; ctypes.CDLL(\"libdbcapi_r.so\")"'
 
 # -----------------------------------------------------------------------------
-step "7. ODBC driver registration (unixODBC / pyodbc)"
+step "7. Liquibase finds its JDBC drivers"
+# -----------------------------------------------------------------------------
+printf 'databaseChangeLog: []\n' > /tmp/build/empty.yaml
+check_output "liquibase runs" 'Liquibase Version' bash -lc 'liquibase --version'
+# Nothing listens on port 1, so every connect must fail - but "Cannot find
+# database driver" means the jar never reached the run's classpath, which is
+# the only failure this step is about. Any other error means the driver loaded
+# and took the connection as far as the network.
+# shellcheck disable=SC2329  # invoked indirectly, as an argument to check
+lb_driver_found() {
+    ! bash -lc "cd /tmp/build && liquibase --headless=true --show-banner=false \
+        --changelog-file=empty.yaml --username=x --password=x --url='$1' status" 2>&1 \
+        | grep -q 'Cannot find database driver'
+}
+check "pgJDBC is on the Liquibase classpath" \
+    lb_driver_found 'jdbc:postgresql://127.0.0.1:1/x'
+check "jConnect is on the Liquibase classpath" \
+    lb_driver_found 'jdbc:sybase:Tds:127.0.0.1:1/x'
+
+# -----------------------------------------------------------------------------
+step "8. ODBC driver registration (unixODBC / pyodbc)"
 # -----------------------------------------------------------------------------
 check_output "odbcinst -q -d lists the SQL Anywhere driver" 'SQL Anywhere 16' \
     odbcinst -q -d
@@ -246,7 +273,7 @@ sys.exit(0 if rc != 0 and "Can't open lib" not in text and "file not found" not 
 PYEOF
 
 # -----------------------------------------------------------------------------
-step "8. installed footprint"
+step "9. installed footprint"
 # -----------------------------------------------------------------------------
 du -sh /opt/sap /opt/sqlanywhere16
 

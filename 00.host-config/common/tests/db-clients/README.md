@@ -17,11 +17,11 @@ throws the container away. No ISO, no VM, no root on the host.
 1. **`packages.list` still resolves.** Every name, on the target release. This
    catches a package that has been renamed or dropped long before an ISO build
    would.
-2. **The SAP stanzas in `guest-install.sh` run.** They are read out of that
-   file at run time between its two section headers, not copied here, so this
-   test fails when that file drifts from what the test claims about it. If the
-   headers are renamed, extraction finds nothing and the test fails rather
-   than quietly passing on an empty script.
+2. **The Liquibase and SAP stanzas in `guest-install.sh` run.** They are read
+   out of that file at run time between its two section headers, not copied
+   here, so this test fails when that file drifts from what the test claims
+   about it. If the headers are renamed, extraction finds nothing and the test
+   fails rather than quietly passing on an empty script.
 3. **The command-line clients run** from a login shell: `isql`, `bcp`,
    `dbisqlc`, `dbping`, `dbisql`, `iqdsn`, `iqsqlpp`, `psql`. `dbping` is
    checked as far as *Database server not found*, which means the request
@@ -33,7 +33,12 @@ throws the container away. No ISO, no VM, no root on the host.
 4. **The three smoke clients compile and run** against what step 2 installed -
    plus the vendor's own `firstapp` sample, built by its own makefile,
    unmodified and with `-Werror`.
-5. **ODBC works through unixODBC.** Both drivers are registered
+5. **Liquibase finds its JDBC drivers.** The CLI runs, and a connect attempt
+   to a closed port on each of `jdbc:postgresql:` and `jdbc:sybase:Tds:` fails
+   with a network error rather than *Cannot find database driver*. Liquibase 5
+   ships none, and its launcher ignores `CLASSPATH`, so this is what proves
+   the links into `/opt/liquibase/lib` took.
+6. **ODBC works through unixODBC.** Both drivers are registered
    (`odbcinst -q -d`), the ASE driver has no unresolved dependencies,
    `odbcversion` runs under `env -i`, and a connect attempt to a closed port
    through `DRIVER={Adaptive Server Enterprise}` fails with the driver's own

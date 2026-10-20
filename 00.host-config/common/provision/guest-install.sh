@@ -417,6 +417,36 @@ fi
 # file and is not meant to be loaded.
 ldconfig
 
+# --- JDBC drivers for the Liquibase CLI ---------------------------------------
+# Liquibase 5 ships no JDBC drivers: internal/lib holds the engine and H2 and
+# nothing else. The launcher runs `java -jar liquibase-core.jar`, so a CLASSPATH
+# in the environment is ignored; lib/ is the vendor's global library directory
+# and its jars join every CLI run. Links, not copies, so the driver tracks
+# whatever installed it. Runs here rather than in the Liquibase stanza because
+# jConnect only exists once the IQ bundle above has unpacked.
+log "Link JDBC drivers into the Liquibase library directory"
+if [[ -d /opt/liquibase/lib ]]; then
+    # PostgreSQL, from libpostgresql-jdbc-java. The unversioned name is the
+    # archive's own symlink onto the versioned jar.
+    if [[ -e /usr/share/java/postgresql.jar ]]; then
+        ln -sf /usr/share/java/postgresql.jar /opt/liquibase/lib/postgresql.jar
+        info "postgresql.jar -> $(readlink -f /usr/share/java/postgresql.jar)"
+    else
+        info "No PostgreSQL JDBC driver installed, skipping"
+    fi
+
+    # ASE and IQ, from the IQ bundle. One driver for both: jConnect speaks TDS.
+    JCONN_JAR="$(find /opt/sap -maxdepth 3 -name 'jconn4.jar' | head -1)"
+    if [[ -n "${JCONN_JAR}" ]]; then
+        ln -sf "${JCONN_JAR}" /opt/liquibase/lib/jconn4.jar
+        info "jconn4.jar -> ${JCONN_JAR}"
+    else
+        info "No jConnect JDBC driver installed, skipping"
+    fi
+else
+    info "No Liquibase install, skipping JDBC driver links"
+fi
+
 # --- Standalone build tools (syft, shfmt, uv, d2) -----------------------------
 # Not apt packages: fetched at ISO-build time by fetch-build-tools.sh, copied
 # straight into /usr/local/bin.

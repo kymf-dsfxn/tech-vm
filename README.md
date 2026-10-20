@@ -29,7 +29,7 @@ document - the rationale lives there, not in READMEs or code comments:
   serves its share over SMB, and reads the host drives over HGFS at
   /mnt/C, /mnt/X, /mnt/S.
 
-Two more capabilities define what the built VM is for as a development
+Three more capabilities define what the built VM is for as a development
 machine:
 
 - `capability.db-development-ase.md` - C, Python and command-line development
@@ -39,3 +39,7 @@ machine:
   development against SAP IQ: the SQL Anywhere client layer, the IQ network
   client (`dbisql`, `iqdsn`) with its bundled SAPJRE, sacapi, sqlanydb and
   jConnect.
+- `capability.db-development.pg.md` - C, Python, JDBC and command-line
+  development against PostgreSQL: libpq and `psql` from the archive, pgJDBC
+  linked into the Liquibase library directory, and why no driver is bundled
+  for Python.

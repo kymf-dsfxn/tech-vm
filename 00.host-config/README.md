@@ -154,12 +154,14 @@ the repo root, and the rationale lives there:
   of absence; `guest-install.sh` writes the fstab block, and `host-drives`
   reports why a share is not there). The host reads the guest share over SMB,
   covered by the datadisk document.
-- **`../capability.db-development-ase.md`** and
-  **`../capability.db-development-iq.md`** - what the SAP client bundles and
-  the ODBC registrations below add up to: a developer can build and run C,
-  Python and command-line work against ASE and IQ on a fresh VM with nothing
-  to install. The bundle mechanics live in this README; the capability
-  documents own the contract.
+- **`../capability.db-development-ase.md`**,
+  **`../capability.db-development-iq.md`** and
+  **`../capability.db-development.pg.md`** - what the SAP client bundles, the
+  ODBC registrations below and the Postgres entries in `packages.list` add up
+  to: a developer can build and run C, Python, JDBC and command-line work
+  against ASE, IQ and PostgreSQL on a fresh VM with nothing to install. The
+  bundle mechanics live in this README; the capability documents own the
+  contract.
 
 On a new guest the first `data-disk unlock` starts nothing, and says so. That
 is the node reporting that it is not set up yet, not a fault.
