@@ -69,7 +69,7 @@ The self-lint has two halves. The mechanical half is boring and objective, so ha
 **Mechanical pass - run the script.** For a file, run:
 
 ```
-python scripts/lint.py <file> --mode standard   # or --mode strict
+python ${CLAUDE_SKILL_DIR}/scripts/lint.py <file> --mode standard # or --mode strict
 ```
 
 It flags semicolons, over-long sentences (cap 20 strict / 25 standard), contractions, stray non-ASCII (tag tokens and code are exempt), and slop words. It marks each finding `error` (fix it) or `review` (judge in context - a semicolon that joins two clauses, or a long quoted requirement phrase, can be fine). Exit code is 0 when clean, so it can gate a build. If you cannot run the script (no file, or no Python), fall through to the manual checks below, which cover the same ground:

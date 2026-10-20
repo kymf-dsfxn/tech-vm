@@ -52,7 +52,9 @@ common/
     extra_cfg/                 apt-minimal.conf, settings.xml, and so on.
       syncthing/               node-config.xml.template and the syncthing@
                                data-disk.conf drop-in.
-    extra_deb/                 Company CA and Syncthing .debs.
+    extra_deb/                 Company CA .deb. The Syncthing .deb is not
+                               committed: fetch-build-tools.sh pins and fetches
+                               it, and the ISO build stages it here.
     extra_tgz/                 Maven, Liquibase, and the SAP ASE client, ASE
                                ODBC driver and SQL Anywhere client bundles.
     extra_keys/                Public keys (kymf.pub).
@@ -126,8 +128,8 @@ and artifact filenames, and changing them breaks things:
 
 - `Host github-qf` in `common/payload/extra_cfg/config` - an SSH host alias
   bound to a specific company identity file. (`github-dsfxn` sits beside it.)
-  Note: this file is staged to `/opt/vm-init/extra_cfg/config` but nothing
-  installs it into a user's `~/.ssh` yet.
+  `guest-install.sh` installs this file to the named user's `~/.ssh/config`
+  (0600). It holds no secrets: the key paths point into the encrypted share.
 - `<id>qf-nexus</id>` and `nexus.q-free.com` in
   `common/payload/extra_cfg/settings.xml` - a real Maven mirror.
 - The `ca-certificates-qfree_*_all.deb` glob in `guest-install.sh` - the literal
@@ -135,7 +137,9 @@ and artifact filenames, and changing them breaks things:
   without rebuilding the .deb silently skips the CA install, and the package
   name inside the control data stays `ca-certificates-qfree` regardless.
 - The `syncthing_*_amd64.deb` glob in `guest-install.sh` - same reasoning. The
-  filename is the version pin (see `capability.data-synchronisation.md`).
+  version pin is `SYNCTHING_VERSION` and `SYNCTHING_SHA256` in
+  `01.iso-build/scripts/fetch-build-tools.sh`; the filename carries the version
+  (see `capability.data-synchronisation.md`).
   Renaming the glob silently skips the install, and `guest-install.sh` only
   prints "No Syncthing .deb in payload, skipping".
 

@@ -21,7 +21,7 @@ cache.
 # 1. Fetch the package closure into an offline repo (needs docker or podman)
 ./scripts/build-package-repo.sh
 
-# 2. Fetch the standalone build tools (syft, shfmt, uv, d2; needs curl, tar, sha256sum)
+# 2. Fetch the standalone build tools (syft, shfmt, uv, d2) and the Syncthing .deb (needs curl, tar, sha256sum)
 ./scripts/fetch-build-tools.sh
 
 # 3. Build a host ISO (hosts are the <host>/ directories in 00.host-config)
@@ -52,6 +52,14 @@ syft, shfmt, uv and d2 are not in apt, so they cannot come from the offline repo
 `.cache/build-tools/bin`; syft and shfmt are pinned to the exact version and
 sha256 the sdlc build images use. The ISO carries the tree, and
 `guest-install.sh` installs the binaries into `/usr/local/bin` with no network.
+
+The same script fetches the pinned Syncthing `.deb` (`SYNCTHING_VERSION`,
+`SYNCTHING_SHA256`) into `.cache/build-tools/deb`. `build-custom-iso.sh` fails
+without it and stages it into the guest's `extra_deb`, replacing any copy the
+payload merge brought in. The `.deb` is not committed (`*.deb` is git-ignored),
+so the pin is what makes the version reproducible from a clean clone. To bump
+it, change the version, download the `.deb` once, inspect it, and set the new
+sha256.
 
 ## Build metadata and the manifest
 

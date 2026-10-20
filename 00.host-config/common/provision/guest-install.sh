@@ -87,6 +87,12 @@ mapfile -t PKGS < <(grep -vE '^\s*(#|$)' "${PACKAGES_LIST}")
 info "Installing: ${PKGS[*]}"
 apt-get install -y --no-install-recommends "${PKGS[@]}"
 
+# --- Mask nmbd ---------------------------------------------------------------
+# smb.conf sets `disable netbios = yes`, so nmbd has nothing to serve. Masked
+# after the install above: samba's postinst enables it.
+log "Mask nmbd"
+systemctl mask nmbd.service || true
+
 # --- Locale ------------------------------------------------------------------
 log "Harden locale to en_US.UTF-8, TZ=UTC"
 printf 'export LANG=en_US.UTF-8\nexport LC_ALL=en_US.UTF-8\nexport TZ=UTC\n' \
@@ -171,6 +177,10 @@ install --directory --mode=0700 --owner="${NAMED_USER}" --group="${NAMED_USER}" 
 install -m 0600 -o "${NAMED_USER}" -g "${NAMED_USER}" \
     "${PAYLOAD_KEYS}/${NAMED_USER}.pub" \
     "/home/${NAMED_USER}/.ssh/authorized_keys"
+# Host aliases and tunnels. No secrets: IdentityFile paths point into the
+# encrypted share, so the config is inert until the data disk is unlocked.
+install -m 0600 -o "${NAMED_USER}" -g "${NAMED_USER}" \
+    "${PAYLOAD_CFG}/config" "/home/${NAMED_USER}/.ssh/config"
 
 # --- Home directory overlay (from payload) -----------------------------------
 # Verbatim copy onto the named user's home (dotfiles, tool config, skills);

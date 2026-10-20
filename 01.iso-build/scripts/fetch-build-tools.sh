@@ -6,6 +6,11 @@
 # uv and d2. Each download is checksum-verified and staged under
 # .cache/build-tools/bin (git-ignored, not committed).
 #
+# Also fetches the pinned Syncthing .deb into .cache/build-tools/deb.
+# build-custom-iso.sh moves it into the guest's extra_deb. It is fetched, not
+# committed, because *.deb is git-ignored: the pin below is what makes the
+# version reproducible from a clean clone.
+#
 # syft, shfmt and d2 refetch only when their pins below change. uv defaults to
 # "latest", resolved at run time, so a rerun can change the staged uv unless
 # --uv-version pins it.
@@ -44,6 +49,15 @@ D2_VERSION="v0.9.0"
 D2_SHA256="5669ddc46b99e942cc96078f4a4e36d5e62103348f4c05179ede27802fdd87a9"
 D2_URL="https://github.com/d2lang/d2/releases/download/${D2_VERSION}/d2-${D2_VERSION}-linux-amd64.tar.gz"
 
+# syncthing: the version is the pin; guest-install.sh globs syncthing_*_amd64.deb.
+# The official .deb is a GitHub release asset. Not a packages.list entry on
+# purpose (see 00.host-config/README.md, "packages.list"). To bump: change the
+# version, download once, and set the sha256 from the file you inspected.
+SYNCTHING_VERSION="2.1.3"
+SYNCTHING_SHA256="ed148130661a27cd3961fda58bd91c17b205fa3d7ab312a1d6cbf21e59731f30"
+SYNCTHING_DEB="syncthing_${SYNCTHING_VERSION}_amd64.deb"
+SYNCTHING_URL="https://github.com/syncthing/syncthing/releases/download/v${SYNCTHING_VERSION}/${SYNCTHING_DEB}"
+
 # uv: version resolved at build time unless pinned; integrity checked against
 # the release-published .sha256 sidecar.
 UV_VERSION="latest"
@@ -66,9 +80,10 @@ for tool in curl tar sha256sum; do
 done
 
 BIN_DIR="${OUT_DIR}/bin"
-mkdir -p "${BIN_DIR}"
+mkdir -p "${BIN_DIR}" "${OUT_DIR}/deb"
 OUT_ABS="$(cd "${OUT_DIR}" && pwd)"
 BIN_ABS="${OUT_ABS}/bin"
+DEB_ABS="${OUT_ABS}/deb"
 MANIFEST="${OUT_ABS}/build-tools-manifest.txt"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -103,6 +118,13 @@ verify_sha "${TMP_DIR}/d2.tar.gz" "${D2_SHA256}"
 tar -xzf "${TMP_DIR}/d2.tar.gz" -O "d2-${D2_VERSION}/bin/d2" > "${BIN_ABS}/d2"
 chmod 0755 "${BIN_ABS}/d2"
 
+# --- syncthing .deb ------------------------------------------------------------
+_cprint 6 "Fetching syncthing ${SYNCTHING_VERSION}"
+rm -f "${DEB_ABS}"/syncthing_*_amd64.deb   # a bumped pin must not leave the old deb to be globbed
+curl -fsSL "${SYNCTHING_URL}" -o "${TMP_DIR}/${SYNCTHING_DEB}"
+verify_sha "${TMP_DIR}/${SYNCTHING_DEB}" "${SYNCTHING_SHA256}"
+install -m 0644 "${TMP_DIR}/${SYNCTHING_DEB}" "${DEB_ABS}/${SYNCTHING_DEB}"
+
 # --- uv --------------------------------------------------------------------
 if [[ "${UV_VERSION}" == "latest" ]]; then
   # Resolve the newest tag from the releases/latest redirect (no GitHub API).
@@ -133,9 +155,10 @@ chmod 0755 "${BIN_ABS}/uv" "${BIN_ABS}/uvx"
   printf 'shfmt\t%s\t%s\n' "${SHFMT_VERSION}" "${SHFMT_SHA256}"
   printf 'd2\t%s\t%s\n'    "${D2_VERSION}"    "${D2_SHA256}"
   printf 'uv\t%s\t%s\n'    "${UV_VERSION}"    "${UV_SHA256}"
+  printf 'syncthing\t%s\t%s\n' "${SYNCTHING_VERSION}" "${SYNCTHING_SHA256}"
 } > "${MANIFEST}"
 
 _cprint 2 "Staged build tools in ${BIN_ABS}:"
-ls -1 "${BIN_ABS}"
+ls -1 "${BIN_ABS}" "${DEB_ABS}"
 _cprint 6 "Manifest: ${MANIFEST}"
 _cprint 2 "uv resolved to ${UV_VERSION} (sha256 ${UV_SHA256})"

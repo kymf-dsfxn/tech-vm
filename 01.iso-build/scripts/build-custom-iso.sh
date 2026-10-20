@@ -88,6 +88,8 @@ for asset in "${COMMON_ASSETS[@]}"; do
 done
 [[ -d "${APT_REPO_DIR}" && -f "${APT_REPO_DIR}/Packages" ]] \
   || _die "Offline apt repo not found at ${APT_REPO_DIR}. Build it: ${SCRIPT_DIR}/build-package-repo.sh"
+compgen -G "${BUILD_TOOLS_DIR}/deb/syncthing_*_amd64.deb" >/dev/null \
+  || _die "Syncthing .deb not found in ${BUILD_TOOLS_DIR}/deb. Fetch it: ${SCRIPT_DIR}/fetch-build-tools.sh"
 [[ -d "${BUILD_TOOLS_DIR}/bin" ]] \
   || _die "Build tools not found at ${BUILD_TOOLS_DIR}. Fetch them: ${SCRIPT_DIR}/fetch-build-tools.sh"
 command -v xorriso &>/dev/null || _die "xorriso not installed. apt install xorriso"
@@ -169,6 +171,14 @@ cp -a "${APT_REPO_DIR}" "${VM_INIT_STAGE}/apt-repo"
 
 # Standalone build tools (syft, shfmt, uv, d2) fetched by fetch-build-tools.sh
 cp -a "${BUILD_TOOLS_DIR}" "${VM_INIT_STAGE}/build-tools"
+
+# The fetched Syncthing .deb belongs with the other payload .debs. It replaces
+# any copy the payload merge brought in, so the pin in fetch-build-tools.sh is
+# the only version that can ship.
+mkdir -p "${VM_INIT_STAGE}/extra_deb"
+rm -f "${VM_INIT_STAGE}"/extra_deb/syncthing_*_amd64.deb
+mv "${VM_INIT_STAGE}"/build-tools/deb/syncthing_*_amd64.deb "${VM_INIT_STAGE}/extra_deb/"
+rmdir "${VM_INIT_STAGE}/build-tools/deb"
 
 # Build metadata (identity + assembly timestamp)
 printf '%s\n' \
