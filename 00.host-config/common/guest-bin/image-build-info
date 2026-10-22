@@ -2,24 +2,45 @@
 # image-build-info
 #
 # Print the image identity and build timestamp. With --manifest, print the full
-# build manifest instead. The no-argument output matches the WSL base image, so
-# one command behaves the same on a WSL distro and a VM guest.
+# build manifest instead: the JSON manifest of a VM guest, or, when that file is
+# absent, the key=value fragments of a container image, one file per layer under
+# /etc/image-build-manifest.d/, in sorted order with a "# ---- <name>" line
+# before each. The no-argument output matches the WSL base image and the OCI
+# base images, so one command behaves the same on a VM guest, a WSL distro and
+# a container.
 set -euo pipefail
 
 ENV_FILE="/etc/image-build-info.env"
 MANIFEST_FILE="/etc/image-build-manifest.json"
+MANIFEST_DIR="/etc/image-build-manifest.d"
 
 if [[ "${1:-}" == "--manifest" ]]; then
-    if [[ ! -f "${MANIFEST_FILE}" ]]; then
-        echo "Error: ${MANIFEST_FILE} not found" >&2
-        exit 1
+    if [[ -f "${MANIFEST_FILE}" ]]; then
+        if command -v python3 >/dev/null 2>&1; then
+            python3 -m json.tool "${MANIFEST_FILE}"
+        else
+            cat "${MANIFEST_FILE}"
+        fi
+        exit 0
     fi
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -m json.tool "${MANIFEST_FILE}"
-    else
-        cat "${MANIFEST_FILE}"
+    if [[ -d "${MANIFEST_DIR}" ]]; then
+        # Byte order, so the NN. layer prefixes sort the same under every locale.
+        export LC_ALL=C
+        shopt -s nullglob
+        fragments=( "${MANIFEST_DIR}"/* )
+        if [[ ${#fragments[@]} -eq 0 ]]; then
+            echo "Error: ${MANIFEST_DIR} holds no fragments" >&2
+            exit 1
+        fi
+        for fragment in "${fragments[@]}"; do
+            [[ -f "${fragment}" ]] || continue
+            printf '# ---- %s\n' "${fragment##*/}"
+            cat "${fragment}"
+        done
+        exit 0
     fi
-    exit 0
+    echo "Error: neither ${MANIFEST_FILE} nor ${MANIFEST_DIR} found" >&2
+    exit 1
 fi
 
 if [[ ! -f "${ENV_FILE}" ]]; then
