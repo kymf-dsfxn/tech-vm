@@ -27,6 +27,11 @@ PACKAGES_LIST="${VM_INIT_DIR}/packages.list"
 BUILD_TOOLS_DIR="${VM_INIT_DIR}/build-tools"
 
 NAMED_USER="kymf"
+# Pinned for the same reason as the platform UIDs below: a data disk moved to a
+# rebuilt node keeps valid ownership for files the named user owns there (the
+# podman graphroot, the work area). 1000 is free because the installer's
+# recovery user moves to 404 first.
+NAMED_USER_UID=1000
 
 # --- Platform layer identity -------------------------------------------------
 # One label, the platform_namespace, derives the platform users, groups and
@@ -168,7 +173,7 @@ useradd --comment "syncthing service account" --system \
 # Named user: a person, not a platform concept. Only the group it joins is
 # derived.
 useradd --comment "${NAMED_USER}" --create-home --shell /bin/bash \
-    --groups "${PLATFORM_CORE_USER}",sudo "${NAMED_USER}"
+    --uid "${NAMED_USER_UID}" --groups "${PLATFORM_CORE_USER}",sudo "${NAMED_USER}"
 printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${NAMED_USER}" \
     > "/etc/sudoers.d/011-${NAMED_USER}-nopw"
 chmod 0440 "/etc/sudoers.d/011-${NAMED_USER}-nopw"
@@ -189,6 +194,20 @@ log "Install home directory overlay for ${NAMED_USER}"
 if [[ -d "${PAYLOAD_HOME}" ]]; then
     cp -a "${PAYLOAD_HOME}/." "/home/${NAMED_USER}/"
     chown -R "${NAMED_USER}:${NAMED_USER}" "/home/${NAMED_USER}"
+    # cp -a also keeps the payload's modes, and those are the share's: setgid
+    # directories and 0764 files from the Syncthing tree, or 0644 scripts from a
+    # git checkout. Set the modes here instead, for the overlaid paths only.
+    # 00755, not 0755: chmod keeps a directory's setgid bit unless the numeric
+    # mode has the extra leading zero.
+    (
+        cd "${PAYLOAD_HOME}"
+        find . -mindepth 1 -type d -printf '%P\0' |
+            xargs -0 -r -I{} chmod 00755 "/home/${NAMED_USER}/{}"
+        find . -type f -printf '%P\0' |
+            xargs -0 -r -I{} chmod 0644 "/home/${NAMED_USER}/{}"
+        find . -type f \( -path './bin/*' -o -path '*/scripts/*.py' \) -printf '%P\0' |
+            xargs -0 -r -I{} chmod 0755 "/home/${NAMED_USER}/{}"
+    )
     info "Overlaid $(find "${PAYLOAD_HOME}" -mindepth 1 -maxdepth 1 -printf '%f ')"
 else
     info "No home directory overlay in payload, skipping"
@@ -201,6 +220,18 @@ log "Add \$HOME/bin to PATH for login shells"
 printf 'if [ -d "$HOME/bin" ]; then\n    PATH="$HOME/bin:$PATH"\nfi\n' \
     > /etc/profile.d/home-bin.sh
 chmod 0644 /etc/profile.d/home-bin.sh
+
+# --- direnv hook --------------------------------------------------------------
+# In /etc/bash.bashrc, not profile.d: profile.d runs for login shells only, and
+# the hook must run in every interactive shell. Guarded, so a missing package
+# leaves the shell working. The trust list ships in the home overlay
+# (~/.config/direnv/direnv.toml). Design: capability.multi-company-build.md.
+log "Hook direnv into interactive bash"
+DIRENV_HOOK='command -v direnv >/dev/null 2>&1 && eval "$(direnv hook bash)"'
+if ! grep -qF "${DIRENV_HOOK}" /etc/bash.bashrc; then
+    printf '\n# direnv: per-directory environment (capability.multi-company-build.md)\n%s\n' \
+        "${DIRENV_HOOK}" >> /etc/bash.bashrc
+fi
 
 # --- JAVA_HOME ---------------------------------------------------------------
 log "Set JAVA_HOME"
@@ -224,9 +255,17 @@ if [[ -n "${MAVEN_TARBALL}" ]]; then
     # settings.xml for the named user
     install --directory --owner="${NAMED_USER}" --group="${NAMED_USER}" \
         "/home/${NAMED_USER}/.m2"
+    # settings.xml is the neutral default (no mirror, Maven Central). The
+    # company files are selected per tree by MAVEN_ARGS from a direnv .envrc,
+    # and are 0600 because a deploy adds credentials to them.
+    # Design: capability.multi-company-build.md.
     install -m 0644 --owner="${NAMED_USER}" --group="${NAMED_USER}" \
         "${PAYLOAD_CFG}/settings.xml" "/home/${NAMED_USER}/.m2/settings.xml"
-    info "settings.xml installed for ${NAMED_USER}"
+    for company_settings in settings-qfree.xml settings-tieto.xml; do
+        install -m 0600 --owner="${NAMED_USER}" --group="${NAMED_USER}" \
+            "${PAYLOAD_CFG}/${company_settings}" "/home/${NAMED_USER}/.m2/${company_settings}"
+    done
+    info "settings.xml, settings-qfree.xml, settings-tieto.xml installed for ${NAMED_USER}"
 else
     info "No Maven tarball in payload, skipping"
 fi
@@ -356,16 +395,22 @@ EOF
     # step per VM. "SQL Anywhere 16" is an alias the migration-project's
     # extraction scripts need when invoking with --driver; it is just a label in
     # odbcinst.ini, not tied to the bundle's actual SQLANY_VER.
+    #
+    # "SQL Anywhere 17" is a second alias for the same driver: the IQ
+    # extraction scripts in micos-migration-project and tech-data-mig use it
+    # as their default --driver.
     ODBC_DRIVER_DEF="$(mktemp)"
-    cat > "${ODBC_DRIVER_DEF}" <<EOF
-[SQL Anywhere 16]
+    for odbc_alias in "SQL Anywhere 16" "SQL Anywhere 17"; do
+        cat > "${ODBC_DRIVER_DEF}" <<EOF
+[${odbc_alias}]
 Driver=${SQLANY_HOME}/lib64/libdbodbc${SQLANY_VER}_r.so
 Setup=${SQLANY_HOME}/lib64/libdbodbcinst${SQLANY_VER}_r.so
 FileUsage=1
 EOF
-    odbcinst -i -d -f "${ODBC_DRIVER_DEF}"
+        odbcinst -i -d -f "${ODBC_DRIVER_DEF}"
+        info "Registered ODBC driver '${odbc_alias}' -> ${SQLANY_HOME}/lib64/libdbodbc${SQLANY_VER}_r.so"
+    done
     rm -f "${ODBC_DRIVER_DEF}"
-    info "Registered ODBC driver 'SQL Anywhere 16' -> ${SQLANY_HOME}/lib64/libdbodbc${SQLANY_VER}_r.so"
 
     info "SAP SQL Anywhere client at ${SQLANY_HOME}"
 else
@@ -419,6 +464,13 @@ EOF
     info "SAP IQ network client at /opt/sap/${IQ_DIR}${IQ_JRE_HOME:+ (JRE ${IQ_JRE_HOME})}"
 else
     info "No SAP IQ client tarball in payload, skipping"
+fi
+
+# The IQ bundles were repacked inside the share, so their ./sap and
+# ./sap/shared directory entries carry the share's setgid bit. Harmless under
+# group root, but not this tree's mode, so clear it.
+if [[ -d /opt/sap ]]; then
+    find /opt/sap -type d -perm -2000 -exec chmod g-s {} +
 fi
 
 # Pick up whichever ld.so.conf.d fragments were written above. The warnings it
@@ -495,7 +547,6 @@ fi
 log "Point ${NAMED_USER}'s podman storage at the data disk"
 install -d -m 0755 -o "${NAMED_USER}" -g "${NAMED_USER}" "/home/${NAMED_USER}/.config"
 install -d -m 0755 -o "${NAMED_USER}" -g "${NAMED_USER}" "/home/${NAMED_USER}/.config/containers"
-NAMED_USER_UID="$(id -u "${NAMED_USER}")"
 cat > "/home/${NAMED_USER}/.config/containers/storage.conf" <<EOF
 [storage]
 driver = "overlay"
@@ -601,7 +652,8 @@ printf '#!/bin/bash\nfiglet -k "%s" && figlet -k "%s"\n' \
     "${INSTANCE_ENV}" "${HOST_ID}" > /etc/update-motd.d/99-banner
 chmod 0755 /etc/update-motd.d/99-banner
 # "Is the data disk up right now?" is the first thing to know at login.
-printf '#!/bin/bash\n/usr/local/bin/data-disk status --brief\n' \
+# sync-node prints a line only when the folder has pull errors.
+printf '#!/bin/bash\n/usr/local/bin/data-disk status --brief\n/usr/local/bin/sync-node status --brief 2>/dev/null || true\n' \
     > /etc/update-motd.d/98-data-disk
 chmod 0755 /etc/update-motd.d/98-data-disk
 

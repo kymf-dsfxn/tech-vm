@@ -44,6 +44,9 @@ autoinstall:
     #  from the mounted ISO into the target.
     - mkdir -p /target/opt/vm-init
     - cp -a /cdrom/autoinstall/vm-init/. /target/opt/vm-init/
+    #  cp -a keeps the build user's uid, which is 1000, the named user, in the
+    #  target. The provisioning scripts must be root's.
+    - chown -R root:root /target/opt/vm-init
 
     # guest-install.sh provisions the target; see its header.
     - curtin in-target --target=/target -- /opt/vm-init/guest-install.sh

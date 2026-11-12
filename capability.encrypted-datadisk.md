@@ -115,7 +115,7 @@ at every peer.
 
 ## Layout and ownership
 
-Three directories on the mounted filesystem, created by `data-disk` and
+Four directories on the mounted filesystem, created by `data-disk` and
 nothing else:
 
 - `/srv/dsfxn/share`, `2775 dsfxn:dsfxn` - what replicates and what SMB serves.
@@ -125,8 +125,21 @@ nothing else:
   graphroot (`~/.config/containers/storage.conf`, written by
   `guest-install.sh`). Node-local, not replicated: it sits beside `share/`,
   not inside it.
+- `/srv/dsfxn/work`, `0755 kymf:kymf` - the work area for container and build
+  output that must not replicate: test databases, migration work trees, test
+  results with generated names. Node-local, like the graphroot. A container
+  that writes here needs no `--userns=keep-id`, because nothing here
+  replicates; a container that must write into the share does.
 
 `init` creates them on the provably new filesystem; `unlock` re-asserts them.
+
+Nothing else creates a directory beside `share/`. The data root is
+`2775 dsfxn:dsfxn`, so a directory a tool creates there itself inherits group
+`dsfxn` and the setgid bit. That broke rootless podman on one node: podman
+created its graphroot as `2700 kymf:dsfxn`, gid 500 has no mapping in the
+named user's user namespace, and every overlay mount failed. Put new
+node-local output under `work/`, or add the directory to `ensure_data_layout`
+in `data-disk` with explicit ownership.
 No consumer command may create the share: a command that can conjure an empty
 share is a command that can tell every peer the share was emptied. (There is
 also a mechanical block: a consumer running inside the packaged Syncthing
@@ -213,9 +226,30 @@ share directory, which is the right question: the share lives inside the mount,
 so a bare mountpoint has no share to serve.
 
 The share points at `/srv/dsfxn/share` (one level below the data root, so
-`.platform` is never served), carries `create mask = 0664` and
-`directory mask = 2775` to match the platform permission model, and vetoes the
-folder marker so a tidy-up from a client cannot delete the guard.
+`.platform` is never served). Four settings make every SMB write match the
+platform permission model:
+
+```ini
+force group = dsfxn
+force create mode = 0664
+force directory mode = 2775
+nt acl support = no
+```
+
+The masks (`create mask = 0664`, `directory mask = 2775`) only limit bits.
+The `force` settings set them, and `force group` holds even below a directory
+that lost its setgid bit, where a Windows save would otherwise land in the
+named user's private group. `nt acl support = no` matters more than it looks.
+Office copies the Windows security descriptor on save. With NT ACL support on,
+Samba maps that descriptor to a POSIX ACL, and the ACL mask shows in the group
+mode bits: a `0664` file reads as `0674`. Syncthing replicates the mode bits
+but not the ACL, so the access model then differs from node to node. Measured
+before the change: 21 to 37 files per node carried such ACLs.
+
+`veto files` hides the folder marker, so a tidy-up from a client cannot delete
+the guard, and `.stversions`, which the named user cannot delete in anyway. A
+per-host list can add names; none ships (see `capability.host-data-access.md`,
+"What the share serves").
 
 The SMB password is not set during the build - `smbpasswd` is interactive and
 `guest-firstboot.sh` must stay non-interactive. Set it once over SSH with

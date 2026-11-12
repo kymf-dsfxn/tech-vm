@@ -215,6 +215,108 @@ live with it: keep executables in git, which records the bit (first choice), or
 keep mode-sensitive content in a second Linux-only folder (only if the first
 proves insufficient - a second folder is a second thing to operate).
 
+### Where the model breaks: tools that set modes themselves
+
+Umask 0002 decides the mode only for a writer that lets it. A tool that sets
+the mode itself bypasses it, and the mode it sets replicates like any other.
+The gap assessments of 2026-11-11 measured five such entries on every Linux
+node:
+
+- **Mode-preserving copies.** `cp -a`, `rsync -a`, `scp -p`, `tar -x` as the
+  owner, unzip and release tarballs all carry their source modes. About 940
+  directories per node were `2755` (the kernel still adds the setgid bit) and
+  about 2,400 files had no group write. Where `stsync` owns the copy, the
+  named user cannot create, rename or delete in such a directory, or edit
+  such a file in place. `git pull` and editor saves then fail with `EACCES`.
+- **`mkstemp` and rename.** A tool that writes through a temporary file gets
+  `0600` and keeps it. `stsync` cannot read the file, so it never leaves the
+  node, and Syncthing reports a pull error. `CAP_FOWNER` lets Syncthing chmod
+  a file, not read one.
+- **Explicit chmod on directories.** pytest 8.1 and later chmods
+  `.pytest_cache` to `0777 & ~umask`, and some build steps chmod staged trees
+  to `0775`. Both clear the setgid bit, so files created below get the
+  writer's private group. A `kymf:kymf 0775` directory gives `stsync` only
+  read and execute: a delete arriving from a peer then fails, because the
+  versioner cannot move the file out. Measured: 28 pull errors on one node
+  from this alone.
+- **Trees moved in from outside the share.** `mv` from `/tmp` keeps the
+  source group (`kymf`), where a directory created in the share would have
+  inherited `dsfxn`.
+- **Rootless containers writing into the share.** Files land owned by a
+  subordinate uid (165536 + n), which the named user cannot delete without
+  `podman unshare`.
+
+The rule for anything copied into the share: copy without modes and without
+ownership, and never move a tree in from outside.
+
+```bash
+cp -r --no-preserve=mode,ownership <src> <share path>
+tar -x --no-same-permissions --no-same-owner -f <archive> -C <share path>
+rsync -rlt <src> <share path>        # no -a: without -p, -o, -g it keeps the umask's modes
+```
+
+In Python, `shutil.copytree(src, dst, copy_function=shutil.copy)` keeps the
+umask's modes. Container work output belongs in `/srv/dsfxn/work`, which does
+not replicate. A container that must write into the share runs with
+`--userns=keep-id`.
+
+### Keeping the model: `sync-node normalise`
+
+`sudo sync-node normalise` repairs what the tools above break, outside
+`.stversions`: group `dsfxn` on every entry, `g+rwxs` on every directory,
+`g+rw` on every file. It only adds bits, never removes one. It leaves git
+objects alone (`0444` by design), and private keys (`*/security-keys/*`,
+`*.key`), which are `0640` by the rule below. It lists files without group
+read, because those cannot sync, and keys without group read, because those
+are unreadable on every other node.
+
+`--check` reports and changes nothing, and exits 1 when anything needs
+repair. Mode changes replicate, so one node's run fixes the modes everywhere.
+Group changes do not replicate, so run it on each node. A full scan of the
+share takes about two seconds.
+
+### Ignore files
+
+Some content must not replicate at all: virtual environments (they carry
+absolute symlinks to the local Python), caches, build output, and the QNAP
+thumbnail folders the NAS writes. Syncthing never syncs `.stignore` itself, so
+the shared patterns live in a synced `.stglobalignore` at the top of the
+share, and each node's `.stignore` holds one line, `#include .stglobalignore`.
+`data-disk unlock` writes that line when `.stglobalignore` exists and
+`.stignore` does not, and never rewrites it. The order matters: Syncthing
+stops the folder when an `#include` target is missing.
+
+```text
+(?d).@__thumb
+(?d).venv
+(?d).pytest_cache
+(?d)__pycache__
+(?d)**/.build
+(?d)**/dist
+(?d)**/target
+```
+
+`(?d)` lets Syncthing delete an ignored file when it blocks the delete of its
+parent directory. Ignoring a path stops replication; it does not remove the
+copies already on each node.
+
+### SSH keys
+
+The share is the store for SSH private keys, and Syncthing replicates them.
+It is never the path ssh reads. Ownership does not replicate, so the same key
+is `kymf`-owned on the node that wrote it and `stsync`-owned everywhere else,
+and OpenSSH fails either way. A `kymf`-owned key at a group-readable mode is
+refused ("UNPROTECTED PRIVATE KEY FILE"). A `0600` key that `stsync` owns is
+unreadable to `kymf`.
+
+So the rule has two halves. In the share, private keys are `0640`: readable by
+`kymf` through group `dsfxn` on every node, closed to other accounts, and the
+mode replicates. On each node, `~/bin/ssh-keys-sync` copies the keys to
+`~/.ssh/keys/` at `0600 kymf:kymf`, and `~/.ssh/config` names only those
+copies. `data-disk unlock` runs `ssh-keys-sync` as the named user; run it by
+hand after a key changes in the share. The same `0640` rule applies to every
+other private key in the share, such as DNS update keys.
+
 ## Node bring-up
 
 ```sh
@@ -442,9 +544,16 @@ is the design, not a fault.
 
 ## GUI and API access
 
-The GUI and the REST API share one listener, bound to `127.0.0.1:8384` inside
-the guest. Nothing on the network reaches it, including the host laptop.
-`sync-node gui` prints the tunnel:
+The GUI and the REST API share one listener, bound to `0.0.0.0:8384` on every
+guest, so the Windows host reaches the GUI over the VMware NAT without a
+tunnel. The template carries that address, and `sync-node` reads it back from
+the rendered config rather than holding a constant. The guest is reachable
+only from the host's VMware network, but that is still a network: set a GUI
+user and password on each node (Actions > Settings > GUI). `sync-node gui`
+prints the URL and warns when no GUI user is set.
+
+A node whose GUI address was set back to loopback gets the tunnel instead,
+and `sync-node gui` prints it:
 
 ```sh
 ssh -N -L 18384:127.0.0.1:8384 kymf@<guest ip>
@@ -458,10 +567,8 @@ all measured on 2.1.3:
   the guest.
 - Browse to `127.0.0.1` or `localhost`. Syncthing checks the `Host` header and
   answers 403 to a host name, on any port.
-- There is no login prompt. No GUI user or password is set, so whoever reaches
-  the loopback port holds the node's sync config. The tunnel is the access
-  control. Every account on the guest can already sudo, so a GUI password
-  would add nothing against them - a decision, not an accident.
+- Through the tunnel the access control is the SSH login. Every account on
+  the guest can already sudo, so a GUI password adds nothing against them.
 
 The GUI's red "Danger" panel appears when it is reachable off loopback with no
 authentication - the check is literally whether the address starts `127.`,
@@ -473,12 +580,12 @@ notification. The template deliberately carries none; an earlier draft listed
 it instead.
 
 The API key is a bearer token and nothing more: 128 random bits, generated per
-node by `render`, sent in an `X-API-Key` header by programmatic callers. The
-browser is admitted because no password is set and carries CSRF tokens instead;
-`?apikey=` in a URL is refused. On the guest,
-`syncthing cli --home=/srv/dsfxn/.platform/syncthing` reads the key from the
-config, which is why `sync-node` needs no `curl` and no key handling of its
-own - and it is always the same version as the daemon.
+node by `render`, sent in an `X-API-Key` header by programmatic callers, and
+accepted with or without a GUI password. `?apikey=` in a URL is refused.
+`sync-node status` reads the key from the config (so it needs root for the
+folder rows) and asks `/rest/db/status` and `/rest/folder/errors` on loopback.
+For everything else, `syncthing cli --home=/srv/dsfxn/.platform/syncthing`
+reads the key itself and is always the same version as the daemon.
 
 ## Operations
 
@@ -515,8 +622,9 @@ running out is quiet - Syncthing falls back to periodic scans and says so once.
 The guests raise `fs.inotify.max_user_watches` to 524288 via
 `/etc/sysctl.d/31-syncthing-watches.conf`; the filename must not be
 `30-syncthing.conf`, which would replace the package's QUIC-buffer sysctl file
-whole. Keep an `.stignore` covering build output; syncing `node_modules` and
-`target/` is what exhausts watches and the home upstream link.
+whole. Keep build output out of sync with `.stglobalignore` (see Permission
+replication, Ignore files); syncing `node_modules` and `target/` is what
+exhausts watches and the home upstream link.
 
 **Upgrades**: `autoUpgradeIntervalH` is 0 - the image installs offline,
 upgrades belong to the image, and the packaged binary is a `[noupgrade]` build
@@ -574,9 +682,12 @@ next scan, so allow a cycle before reading the count as a failure. Measured on
 restart, with no directory modes changed - the `2775` count was identical
 before and after, which is the point. The bit was never wrong, only forbidden.
 
-**Monitoring**: `sync-node status` reports folder state and connected peers;
-the hub's GUI shows the estate; an alarm can poll `/rest/db/status` on the hub
-for a non-empty `errors` count.
+**Monitoring**: `sudo sync-node status` reports folder state, items needed,
+pull errors with the first few paths, and connected peers. The login banner
+runs `sync-node status --brief`, which prints one line only when the folder
+has pull errors. A pull error is most often the permission model: run
+`sudo sync-node normalise --check`. The hub's GUI shows the estate; an alarm
+can poll `/rest/db/status` on the hub for a non-empty `errors` count.
 
 **Test both paths, and test them separately**: a forward is not exercised from
 inside the house, so remote access needs a mobile hotspot to prove. The home

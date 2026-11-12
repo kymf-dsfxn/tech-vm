@@ -31,10 +31,11 @@ common/
                                lands in /usr/local/bin.
     data-disk                  Encrypted data disk: init/unlock/lock/status.
     sync-node                  Syncthing replica on that disk: identity/id/
-                               render/ensure/marker/status/gui.
+                               render/ensure/marker/status/gui/normalise.
     host-drives                HGFS host drive mounts: status/mount/reset.
     platform_node.py           Shared library: platform.env, the six-state
-                               classifier, marker/template resolution.
+                               classifier, marker/template resolution, the
+                               share permission scan.
     image-build-info           Prints identity, timestamp, and with
                                --manifest the full build manifest.
   packages.list                Every apt package the guest installs. At the
@@ -49,7 +50,9 @@ common/
                                smoke clients against the result.
   payload/                     Files that land in the guest, common to all
                                hosts, copied by the verbatim merge.
-    extra_cfg/                 apt-minimal.conf, settings.xml, and so on.
+    extra_cfg/                 apt-minimal.conf, gitconfig (safe.directory and
+                               the per-tree identity includes), ssh config,
+                               the three Maven settings files, and so on.
       syncthing/               node-config.xml.template and the syncthing@
                                data-disk.conf drop-in.
     extra_deb/                 Company CA .deb. The Syncthing .deb is not
@@ -58,13 +61,20 @@ common/
     extra_tgz/                 Maven, Liquibase, and the SAP ASE client, ASE
                                ODBC driver and SQL Anywhere client bundles.
     extra_keys/                Public keys (kymf.pub).
-    extra_home/                Verbatim overlay onto the named user's home.
-                               Currently .claude/skills/kymf-expression and
-                               bin/ (git-ds.* scripts, put on PATH).
+    extra_home/                Overlay onto the named user's home. Contents are
+                               copied verbatim; modes are set by
+                               guest-install.sh (0755 directories, 0644 files,
+                               0755 for bin/* and scripts/*.py). Currently
+                               .claude/skills/kymf-expression, .config/direnv
+                               (the .envrc whitelist), .config/git (identity
+                               per company tree) and bin/ (git-ds.* scripts
+                               and ssh-keys-sync, put on PATH).
 <host>/
   autoinstall/user-data        Autoinstall control. Per-host network and identity.
   autoinstall/meta-data        instance-id and local-hostname.
   payload/                     Optional per-host payload overrides (win over common).
+                               extra_cfg/smb-veto.list, if present, adds names
+                               to the SMB share's veto list. No host ships one.
 ```
 
 ## Three kinds of thing
@@ -175,6 +185,15 @@ the repo root, and the rationale lives there:
 
 On a new guest the first `data-disk unlock` starts nothing, and says so. That
 is the node reporting that it is not set up yet, not a fault.
+
+## Unattended upgrades
+
+`unattended-upgrades` stays enabled on every guest, as Ubuntu ships it, and
+security upgrades install daily from the archive. That is a decision, not an
+omission: the image pins what it installs at build time, and the archive keeps
+those packages patched between rebuilds. The payload `.deb` packages
+(Syncthing, the company CA) and the standalone tools in `/usr/local/bin` do not
+take part; they change only with a rebuild.
 
 ## packages.list
 
@@ -301,10 +320,11 @@ pyodbc connection string can address the server either as
 `interfaces` file needed. `/opt/sap/DataAccess64/ODBC/lib` is on the loader path
 (`ld.so.conf.d`) only so that `odbcversion` resolves the driver.
 
-The SQL Anywhere driver is also registered with unixODBC, under the alias
-`SQL Anywhere 16` (an odbcinst.ini label, not the actual `SQLANY_VER` of the
-bundle - it is what the migration-project's Python extraction scripts
-will need to pass via `--driver`). This is what lets Python's `pyodbc` connect
+The SQL Anywhere driver is also registered with unixODBC, twice, under the
+aliases `SQL Anywhere 16` and `SQL Anywhere 17` (odbcinst.ini labels, not the
+actual `SQLANY_VER` of the bundle). The migration-project's Python extraction
+scripts pass `SQL Anywhere 16` via `--driver`; the IQ extraction scripts in
+`micos-migration-project` and `tech-data-mig` default to `SQL Anywhere 17`. This is what lets Python's `pyodbc` connect
 without any manual `odbcinst` step per VM. `unixodbc` and `odbcinst` are
 separate packages on this release - `odbcinst` is not pulled in as a
 dependency of `unixodbc` - so both are listed in `packages.list`.

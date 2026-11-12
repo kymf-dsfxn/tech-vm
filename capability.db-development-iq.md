@@ -17,7 +17,7 @@ this capability is layered:
 
 | Layer | What | From |
 | ----- | ---- | ---- |
-| SQL Anywhere client | `dbisqlc`, `dbping`, `dbdsn`, `dblocate`, `dbvalid`, `dbbackup`, `dbunload`; the sacapi C SDK; the ODBC driver registered as `SQL Anywhere 16` | `sap.sql-anywhere-client.16.tgz` → `/opt/sqlanywhere16` |
+| SQL Anywhere client | `dbisqlc`, `dbping`, `dbdsn`, `dblocate`, `dbvalid`, `dbbackup`, `dbunload`; the sacapi C SDK; the ODBC driver registered as `SQL Anywhere 16` and, for the IQ extraction scripts, `SQL Anywhere 17` | `sap.sql-anywhere-client.16.tgz` → `/opt/sqlanywhere16` |
 | IQ network client | `dbisql` (the Java Interactive SQL console), `iqdsn`, `iqsqlpp` (embedded SQL preprocessor), the `IQ-16_0` libraries and SDK, jConnect 7 | `sap.iq-client.16.tgz` → `/opt/sap/IQ-16_0`, `/opt/sap/jConnect-7_0` |
 | SAPJRE 7 (64-bit) | the JVM `dbisql` runs on | `sap.iq-client-jre.7.tgz` → `/opt/sap/shared/SAPJRE-7_1_015_64BIT` |
 

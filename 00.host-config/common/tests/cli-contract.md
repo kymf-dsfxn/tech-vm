@@ -18,14 +18,29 @@ and is ported verbatim; deviations are listed in the port's commit message.
   observable-first.
 - Output prefixes: `==> ` (log), four spaces (info), `    WARNING: ` to
   stderr (warn), `ERROR: ` to stderr (die).
-- MOTD consumes `status --brief` (one line, `data disk: ...`).
+- MOTD consumes `status --brief` (one line, `data disk: ...`), followed by
+  `sync-node status --brief`.
+- `init` and `unlock` create `share/` (`2775 dsfxn:dsfxn`), `.platform/`
+  (`0750 root:dsfxn`), `podman-storage/` and `work/` (both `0755 kymf:kymf`).
+  They write `share/.stignore` (`#include .stglobalignore`) only when
+  `.stglobalignore` exists and `.stignore` does not, and never rewrite it.
+- `unlock` then runs `~/bin/ssh-keys-sync` as the named user when it is
+  executable. A failure warns and the unlock still succeeds.
 
 ## sync-node
 
-- Commands: `identity | id | render | ensure | marker | status | gui`;
-  options `--force`, `--quiet`, `--create` (marker), `-h/--help`.
+- Commands: `identity | id | render | ensure | marker | status | gui |
+  normalise`; options `--force`, `--quiet`, `--create` (marker), `--check`
+  (normalise), `--brief` (status), `-h/--help`.
 - `status`, `gui` and `marker` (report mode) run without root; `id` needs
-  root in practice (identity behind 0700).
+  root in practice (identity behind 0700). `normalise` needs root.
+- The GUI address is read from the rendered config, then the template, then
+  the default `0.0.0.0:8384`. Never a constant.
+- `status --brief` prints one line only when the folder has pull errors, and
+  nothing otherwise, including when it cannot ask the daemon. Exit 0 always.
+- `normalise` never changes `.stversions`, symlinks, git objects or private
+  keys (`*/security-keys/*`, `*.key`), and never removes a mode bit.
+  `normalise --check` changes nothing and exits 1 when any fault is found.
 - `--quiet` silences log/info, never warn.
 - Refusal semantics that must not change: `identity` refuses to replace
   without `--force`; `render` refuses to overwrite without `--force`, refuses

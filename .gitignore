@@ -16,6 +16,7 @@ logs/
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
 
 # OS / editor cruft
 .DS_Store

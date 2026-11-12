@@ -36,6 +36,7 @@ DATA_MOUNT = _D["data_root"]
 DATA_SHARE = _D["share"]
 DATA_STATE_DIR = _D["state_dir"]
 DATA_PODMAN_STORAGE = _D["podman_storage"]
+DATA_WORK = _D["work"]
 DATA_OWNER = _D["core_user"]
 DATA_GROUP = _D["core_user"]
 DATA_MODE = "2775"
@@ -85,7 +86,7 @@ Commands:
   init      One-time per disk: partition {DATA_DEV}, luksFormat, mkfs.ext4.
             Refuses a disk that already carries a LUKS header unless --force.
   unlock    cryptsetup open, mount {DATA_MOUNT}, set permissions, start the
-            services gated on the mount.
+            services gated on the mount, copy the SSH keys to ~/.ssh/keys.
   lock      Stop the gated services, unmount, cryptsetup close. Refuses if the
             mount is busy; --force kills the holders first.
   status    Report the current state. The only command that runs without root,
@@ -223,9 +224,12 @@ def ensure_data_mount_permissions():
     info(f"{DATA_MOUNT} perms {capture(['stat', '-c', '%U:%G %a', DATA_MOUNT])}")
 
 
-# The one place the share, state and podman storage directories are created.
-# sync-node deliberately cannot: a command that can conjure an empty share can
-# tell every peer the share was emptied.
+# The one place the share, state, podman storage and work directories are
+# created. sync-node deliberately cannot: a command that can conjure an empty
+# share can tell every peer the share was emptied. Every directory beside share/
+# is created here, with explicit ownership: the data root is setgid dsfxn, so a
+# directory a tool creates there itself inherits group dsfxn and the setgid bit,
+# which broke rootless podman on one node.
 def ensure_data_layout():
     run_or_exit(["install", "-d", "-o", DATA_OWNER, "-g", DATA_GROUP,
                  "-m", "2775", DATA_SHARE])
@@ -235,6 +239,45 @@ def ensure_data_layout():
     # since it is that user's own rootless podman storage, not shared state.
     run_or_exit(["install", "-d", "-o", NAMED_USER, "-g", NAMED_USER,
                  "-m", "0755", DATA_PODMAN_STORAGE])
+    # Container and build output that must not replicate: test databases,
+    # migration work trees, long generated names. Node-local, like the
+    # graphroot.
+    run_or_exit(["install", "-d", "-o", NAMED_USER, "-g", NAMED_USER,
+                 "-m", "0755", DATA_WORK])
+    ensure_ignore_include()
+
+
+# Syncthing never syncs .stignore itself, so each node needs its own, and the
+# shared patterns live in the synced .stglobalignore. Written only while the
+# included file exists: Syncthing stops the folder when an #include target is
+# missing. Never rewritten once present, so a hand edit survives.
+def ensure_ignore_include():
+    global_ignore = f"{DATA_SHARE}/.stglobalignore"
+    local_ignore = f"{DATA_SHARE}/.stignore"
+    if not os.path.isfile(global_ignore) or os.path.lexists(local_ignore):
+        return
+    with open(local_ignore, "w", encoding="utf-8") as handle:
+        handle.write("#include .stglobalignore\n")
+    run_or_exit(["chown", f"{DATA_OWNER}:{DATA_GROUP}", local_ignore])
+    os.chmod(local_ignore, 0o664)
+    info(f"Wrote {local_ignore} (#include .stglobalignore)")
+
+
+# Copy the SSH keys from the share to the named user's ~/.ssh/keys, as that
+# user. ssh reads the copies, never the share (capability.data-synchronisation.md,
+# "SSH keys"). A failure warns and never stops the unlock.
+def sync_ssh_keys():
+    import pwd
+    try:
+        home = pwd.getpwnam(NAMED_USER).pw_dir
+    except KeyError:
+        return
+    script = f"{home}/bin/ssh-keys-sync"
+    if not os.access(script, os.X_OK):
+        return
+    log(f"Copy SSH keys to {home}/.ssh/keys")
+    if run(["runuser", "-u", NAMED_USER, "--", script]).returncode != 0:
+        warn(f"ssh-keys-sync could not copy every key, see above. Rerun: {script}")
 
 
 # Close down the bare mountpoint once the real filesystem is gone. Only safe
@@ -379,6 +422,7 @@ def cmd_unlock():
     ensure_data_mount_permissions()
     ensure_data_layout()
     start_gated_services()
+    sync_ssh_keys()
 
     log("Unlocked")
     cmd_status()

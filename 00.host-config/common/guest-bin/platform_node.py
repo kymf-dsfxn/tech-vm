@@ -67,6 +67,8 @@ def derived(env):
         "share": env.get("PLATFORM_DATA_SHARE") or f"{data_root}/share",
         "state_dir": env.get("PLATFORM_DATA_STATE") or f"{data_root}/.platform",
         "podman_storage": f"{data_root}/podman-storage",
+        # Node-local container and build output, off Syncthing.
+        "work": f"{data_root}/work",
         "core_user": env["PLATFORM_CORE_USER"],
         "sync_user": env.get("PLATFORM_SYNC_USER") or "stsync",
         "named_user": env.get("PLATFORM_NAMED_USER") or "kymf",
@@ -193,6 +195,72 @@ def folder_id(config_path=None, template_path=SYNC_TEMPLATE_PATH):
         if value and not value.startswith(("MANUALLY_FIX_", "AUTOFILL_")):
             return value
     return FOLDER_ID_DEFAULT
+
+
+# -- Share permission model ---------------------------------------------------
+
+# The share's model: every entry group dsfxn, directories 2775, files group
+# read-write. Tools that set modes themselves (cp -a, rsync -a, tar -x, mkstemp,
+# pytest, a build that moves a tree in from /tmp) break it, and Syncthing then
+# replicates the broken mode to every Linux node, where stsync owns the copy and
+# the named user is locked out. Design: capability.data-synchronisation.md,
+# "Keeping the model: sync-node normalise".
+
+SHARE_FAULTS = (
+    "wrong_group",          # not a symlink, group is not the platform group
+    "dirs_not_2770",        # directory without g+rwxs
+    "files_no_group_rw",    # regular file without g+rw (git objects, keys excepted)
+    "files_no_group_read",  # regular file without g+r (keys excepted): cannot sync
+    "keys_no_group_read",   # private key without g+r: unreadable on other nodes
+)
+
+
+def is_key_path(path):
+    """Private keys are 0640 by rule: group-readable, never group-writable, so
+    the normaliser leaves their write bit alone."""
+    return "/security-keys/" in path or path.endswith(".key")
+
+
+def is_git_object(path):
+    """Git writes objects 0444 on purpose."""
+    return "/.git/objects/" in path
+
+
+def scan_share_modes(share, gid, skip_top=(".stversions",)):
+    """One walk of the share, returning {fault: [path, ...]} for SHARE_FAULTS.
+    Symlinks are never followed and never mode-checked: a chmod through one
+    acts on its target. skip_top names top-level entries left out, by default
+    the versioner's tree, which Syncthing owns."""
+    faults = {name: [] for name in SHARE_FAULTS}
+    for top, dirs, files in os.walk(share, topdown=True, followlinks=False):
+        if top == share:
+            dirs[:] = [d for d in dirs if d not in skip_top]
+            files = [f for f in files if f not in skip_top]
+        for name in dirs + files:
+            path = os.path.join(top, name)
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                continue
+            if st.st_gid != gid:
+                faults["wrong_group"].append(path)
+            mode = st.st_mode
+            if stat.S_ISDIR(mode):
+                if mode & 0o2070 != 0o2070:
+                    faults["dirs_not_2770"].append(path)
+            elif stat.S_ISREG(mode):
+                key = is_key_path(path)
+                if key:
+                    if not mode & 0o040:
+                        faults["keys_no_group_read"].append(path)
+                    continue
+                if not mode & 0o040:
+                    faults["files_no_group_read"].append(path)
+                if mode & 0o060 != 0o060 and not is_git_object(path):
+                    faults["files_no_group_rw"].append(path)
+    return faults
 
 
 # -- CLI --------------------------------------------------------------------

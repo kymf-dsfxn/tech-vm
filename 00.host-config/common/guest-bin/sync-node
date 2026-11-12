@@ -3,7 +3,7 @@
 # sync-node - operator lifecycle for the Syncthing replica on the platform data
 # disk. Sibling of data-disk: that one owns the disk, this one the replication.
 #
-#   identity / id / render / ensure / marker / status / gui
+#   identity / id / render / ensure / marker / status / gui / normalise
 #
 # Identity, config and index database live on the encrypted disk; the ISO
 # carries only the template. Three rules carry the safety of the design:
@@ -18,11 +18,15 @@
 # written/installed by guest-install.sh.
 # =============================================================================
 
+import json
 import os
 import secrets
 import socket
+import ssl
+import stat
 import subprocess
 import sys
+import urllib.request
 import xml.etree.ElementTree as ET
 
 import platform_node as pn
@@ -50,7 +54,10 @@ SYNC_TEMPLATE = pn.SYNC_TEMPLATE_PATH
 SYNC_SERVICE = f"syncthing@{SYNC_USER}.service"
 SYNCTHING = "/usr/bin/syncthing"
 
-GUI_ADDR = "127.0.0.1:8384"
+# Fallback only: the live address is read from the rendered config, then the
+# template. One address for every node, so the GUI is reachable over the VMware
+# NAT without a tunnel (capability.data-synchronisation.md, "GUI and API access").
+GUI_ADDR_DEFAULT = "0.0.0.0:8384"
 # Workstation end of the SSH tunnel. Not 8384: every laptop runs its own
 # Syncthing there.
 GUI_TUNNEL_PORT = "18384"
@@ -58,6 +65,11 @@ GUI_TUNNEL_PORT = "18384"
 QUIET = False
 FORCE = False
 MARKER_CREATE = False
+CHECK = False
+BRIEF = False
+
+# How many paths normalise lists per fault before it only counts.
+NORMALISE_LIST_LIMIT = 50
 
 
 def log(message):
@@ -83,7 +95,7 @@ def usage(stream=None):
     stream = stream if stream is not None else sys.stdout
     print(f"""sync-node - Syncthing lifecycle for the platform share (namespace {NAMESPACE})
 
-Usage: sync-node <command> [--force] [--quiet]
+Usage: sync-node <command> [--force] [--quiet] [--create] [--check] [--brief]
 
 Commands:
   identity  Create the device key and certificate on the encrypted disk. One
@@ -107,7 +119,14 @@ Commands:
             config and the daemon readback all live behind 0700 on the
             encrypted disk and are reported as "not readable" rather than
             guessed. For the full picture: sudo sync-node status.
-  gui       Print the SSH tunnel that reaches the web interface.
+            --brief prints one line, and only when the folder has pull errors
+            (the login banner uses it).
+  gui       Print how to reach the web interface.
+  normalise Repair the share's permission model, outside .stversions: group
+            {PLATFORM_GROUP} on every entry, g+rwxs on directories, g+rw on files
+            (git objects and private keys excepted). Lists files that cannot
+            sync because they lack group read. --check reports and changes
+            nothing, and exits 1 when anything needs repair. Needs root.
 
 The disk must be unlocked first: sudo data-disk unlock""", file=stream)
 
@@ -218,6 +237,57 @@ def marker_name():
 
 def marker_path():
     return f"{SHARE_DIR}/{marker_name()}"
+
+
+def gui_address():
+    """The GUI and API listener: rendered config, then template, then the
+    default. The config is 0600 stsync, so an unprivileged caller gets the
+    template's answer, which a node's config matches unless edited by hand."""
+    for path in (SYNC_CONFIG, SYNC_TEMPLATE):
+        address = pn.first_element_text(path, ".//gui/address")
+        if address:
+            return address
+    return GUI_ADDR_DEFAULT
+
+
+def gui_is_loopback(address):
+    return address.startswith(("127.", "[::1]:", "localhost:", "/"))
+
+
+def api_address():
+    """Where a caller on this node connects: a wildcard bind answers on
+    loopback."""
+    host, _, port = gui_address().rpartition(":")
+    if host in ("", "0.0.0.0", "[::]"):
+        host = "127.0.0.1"
+    return f"{host}:{port}"
+
+
+def api_get(path):
+    """GET a REST endpoint as JSON, or None when the daemon, the config or the
+    key is unavailable. Needs root: the API key is in the 0600 config."""
+    try:
+        root = ET.parse(SYNC_CONFIG).getroot()
+    except (OSError, ET.ParseError):
+        return None
+    gui = root.find(".//gui")
+    key = gui.findtext("apikey") if gui is not None else None
+    if not key:
+        return None
+    tls = gui.get("tls", "false").lower() == "true"
+    url = f"{'https' if tls else 'http'}://{api_address()}{path}"
+    # The certificate is the node's own self-signed one; this is loopback.
+    context = ssl._create_unverified_context() if tls else None
+    request = urllib.request.Request(url, headers={"X-API-Key": key.strip()})
+    try:
+        with urllib.request.urlopen(request, timeout=3, context=context) as response:
+            return json.load(response)
+    except (OSError, ValueError):
+        return None
+
+
+def folder_status():
+    return api_get(f"/rest/db/status?folder={folder_id()}")
 
 
 def identity_report():
@@ -348,7 +418,7 @@ def cmd_render():
     run_or_exit(["chown", f"{SYNC_USER}:{PLATFORM_GROUP}", SYNC_CONFIG])
     os.chmod(SYNC_CONFIG, 0o600)
     info(f"device {self_id}")
-    info(f"folder {SHARE_DIR}, GUI {GUI_ADDR}, API key held in the config")
+    info(f"folder {SHARE_DIR}, GUI {gui_address()}, API key held in the config")
     if not os.path.isdir(SHARE_DIR):
         warn(f"{SHARE_DIR} does not exist. data-disk creates it at init and\n"
              "       asserts it at unlock. Until it does, the folder is refused, which is the\n"
@@ -376,7 +446,21 @@ def _row(label, value):
     print(f"  {label:<12} {value}")
 
 
+def cmd_status_brief():
+    # Silent unless there is something to act on: the login banner runs this
+    # on every SSH login, and the data-disk line above it already says whether
+    # the disk is up.
+    if not (state_readable() and is_mounted() and have_config()):
+        return 0
+    status = folder_status()
+    if status and status.get("pullErrors"):
+        print(f"sync: {status['pullErrors']} pull errors in the share - sudo sync-node status")
+    return 0
+
+
 def cmd_status():
+    if BRIEF:
+        return cmd_status_brief()
     mounted = "yes" if is_mounted() else "no"
     version = "not installed"
     if os.access(SYNCTHING, os.X_OK):
@@ -456,6 +540,8 @@ def cmd_status():
             _row("marker",
                  "ABSENT - the folder will be refused, which is correct on a bare mountpoint")
 
+    _row("gui", gui_address())
+
     if have_config() and os.access(SYNCTHING, os.X_OK):
         # An empty answer means the daemon is down; counting matches in it
         # would misreport "0 connected".
@@ -465,7 +551,24 @@ def cmd_status():
             connected = peers.count('"connected": true')
             _row("peers", f"{connected} connected")
         else:
-            _row("peers", f"API not answering on {GUI_ADDR}")
+            _row("peers", f"API not answering on {api_address()}")
+
+        status = folder_status()
+        if status:
+            _row("folder", f"{status.get('state', '?')}, "
+                           f"{status.get('needTotalItems', 0)} items needed, "
+                           f"{status.get('pullErrors', 0)} pull errors")
+            if status.get("pullErrors"):
+                _print_folder_errors()
+
+
+def _print_folder_errors(limit=5):
+    errors = (api_get(f"/rest/folder/errors?folder={folder_id()}") or {}).get("errors") or []
+    for entry in errors[:limit]:
+        print(f"  {'':<12}   {entry.get('path', '?')}: {entry.get('error', '?')}")
+    if len(errors) > limit:
+        print(f"  {'':<12}   ... and {len(errors) - limit} more")
+    print(f"  {'':<12}   A permission error here is usually the share model: sudo sync-node normalise --check")
 
 
 # -- marker -------------------------------------------------------------------
@@ -516,29 +619,44 @@ def cmd_marker():
 
 def cmd_gui():
     api_key = None
+    gui_user = None
     if have_config():
         api_key = pn.first_element_text(SYNC_CONFIG, ".//apikey")
+        gui_user = pn.first_element_text(SYNC_CONFIG, ".//gui/user")
+    address = gui_address()
+    port = address.rpartition(":")[2]
     # The address the workstation dials: the Windows host usually cannot
     # resolve the guest's host name.
     addr = capture(["hostname", "-I"]).split()
     addr = addr[0] if addr else socket.gethostname()
 
-    log(f"The web interface listens on {GUI_ADDR} only, never on the network.")
-    info("Forward it over SSH from your workstation:")
-    info("")
-    info(f"  ssh -N -L {GUI_TUNNEL_PORT}:{GUI_ADDR} {NAMED_USER}@{addr}")
-    info("")
-    info(f"Leave that running, then open http://127.0.0.1:{GUI_TUNNEL_PORT}")
-    info("")
-    info(f"The local port is {GUI_TUNNEL_PORT} and not 8384 because the laptop runs its")
-    info("own Syncthing on 8384. Reusing it either fails to bind or shows you the")
-    info("laptop's node while you read it as this one.")
-    info("Browse to 127.0.0.1 or localhost. Syncthing checks the Host header and")
-    info("answers 403 to a host name, whatever port the tunnel uses.")
-    info("")
-    info("There is no login prompt. No GUI user or password is set, so anyone who")
-    info("reaches the loopback port holds this node's sync config. The tunnel is")
-    info("the access control.")
+    if not gui_is_loopback(address):
+        log(f"The web interface listens on {address}.")
+        info("From the Windows host, over the VMware NAT:")
+        info("")
+        info(f"  http://{addr}:{port}")
+        info("")
+        if not state_readable():
+            info("Whether a GUI user is set needs root: sudo sync-node gui")
+        elif gui_user:
+            info(f"The GUI asks for a login (user {gui_user}).")
+        else:
+            warn("no GUI user or password is set, so anyone on the VMware network who")
+            warn("reaches the port holds this node's sync config. Set a user and password")
+            warn("in the GUI: Actions > Settings > GUI.")
+    else:
+        log(f"The web interface listens on {address} only, never on the network.")
+        info("Forward it over SSH from your workstation:")
+        info("")
+        info(f"  ssh -N -L {GUI_TUNNEL_PORT}:{address} {NAMED_USER}@{addr}")
+        info("")
+        info(f"Leave that running, then open http://127.0.0.1:{GUI_TUNNEL_PORT}")
+        info("")
+        info(f"The local port is {GUI_TUNNEL_PORT} and not 8384 because the laptop runs its")
+        info("own Syncthing on 8384. Reusing it either fails to bind or shows you the")
+        info("laptop's node while you read it as this one.")
+        info("Browse to 127.0.0.1 or localhost. Syncthing checks the Host header and")
+        info("answers 403 to a host name, whatever port the tunnel uses.")
     if api_key:
         info("")
         info(f"API key: {api_key}")
@@ -547,10 +665,103 @@ def cmd_gui():
         info(f"  syncthing cli --home={SYNC_HOME} show connections")
 
 
+# -- normalise ------------------------------------------------------------------
+
+_FAULT_LABELS = {
+    "wrong_group": "entries not group {group}",
+    "dirs_not_2770": "directories without g+rwxs",
+    "files_no_group_rw": "files without g+rw",
+    "files_no_group_read": "files without group read (cannot sync)",
+    "keys_no_group_read": "private keys without group read",
+}
+
+
+def _open_nofollow(path, want_dir):
+    """An fd on path that refuses a symlink swapped in since the scan. chmod
+    has no no-follow form on Linux, so the mode is set through the fd."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    if want_dir:
+        flags |= os.O_DIRECTORY
+    fd = os.open(path, flags)
+    st = os.fstat(fd)
+    if (stat.S_ISDIR(st.st_mode) if want_dir else stat.S_ISREG(st.st_mode)):
+        return fd, st
+    os.close(fd)
+    raise OSError(f"{path} changed type since the scan")
+
+
+def _add_mode_bits(path, bits, want_dir):
+    fd, st = _open_nofollow(path, want_dir)
+    try:
+        os.fchmod(fd, stat.S_IMODE(st.st_mode) | bits)
+    finally:
+        os.close(fd)
+
+
+def _list_paths(paths):
+    for path in paths[:NORMALISE_LIST_LIMIT]:
+        print(f"      {os.path.relpath(path, SHARE_DIR)}")
+    if len(paths) > NORMALISE_LIST_LIMIT:
+        print(f"      ... and {len(paths) - NORMALISE_LIST_LIMIT} more")
+
+
+def cmd_normalise():
+    require_root("normalise")
+    require_mount()
+    import grp
+    gid = grp.getgrnam(PLATFORM_GROUP).gr_gid
+
+    log(f"Scan {SHARE_DIR}, outside .stversions")
+    faults = pn.scan_share_modes(SHARE_DIR, gid)
+    for name in pn.SHARE_FAULTS:
+        label = _FAULT_LABELS[name].format(group=PLATFORM_GROUP)
+        print(f"  {len(faults[name]):>7}  {label}")
+
+    if faults["files_no_group_read"]:
+        info("")
+        info("Without group read, stsync cannot read these, so they never leave this node:")
+        _list_paths(faults["files_no_group_read"])
+    if faults["keys_no_group_read"]:
+        info("")
+        info("Keys are never changed here. Set each to 0640 on the node where the named")
+        info("user owns it; the mode replicates:")
+        _list_paths(faults["keys_no_group_read"])
+
+    repairable = ("wrong_group", "dirs_not_2770", "files_no_group_rw")
+    if CHECK:
+        return 1 if any(faults[name] for name in pn.SHARE_FAULTS) else 0
+
+    # Group first: chown by root clears setgid on a file, never on a directory,
+    # and the mode pass below reads the mode fresh.
+    failed = []
+    for path in faults["wrong_group"]:
+        try:
+            os.chown(path, -1, gid, follow_symlinks=False)
+        except OSError as exc:
+            failed.append(f"{path}: {exc}")
+    for path in faults["dirs_not_2770"]:
+        try:
+            _add_mode_bits(path, 0o2070, want_dir=True)
+        except OSError as exc:
+            failed.append(f"{path}: {exc}")
+    for path in faults["files_no_group_rw"]:
+        try:
+            _add_mode_bits(path, 0o060, want_dir=False)
+        except OSError as exc:
+            failed.append(f"{path}: {exc}")
+
+    repaired = sum(len(faults[name]) for name in repairable) - len(failed)
+    log(f"Repaired {repaired} entries. Mode changes replicate; group changes are local,")
+    info("so run this on each node.")
+    for line in failed[:NORMALISE_LIST_LIMIT]:
+        warn(line)
+    return 1 if failed else 0
+
+
 # -- Dispatch -------------------------------------------------------------------
 
 def main(argv):
-    global QUIET, FORCE, MARKER_CREATE
+    global QUIET, FORCE, MARKER_CREATE, CHECK, BRIEF
 
     command = argv[0] if argv else ""
     for option in argv[1:]:
@@ -560,6 +771,10 @@ def main(argv):
             QUIET = True
         elif option == "--create":
             MARKER_CREATE = True
+        elif option == "--check":
+            CHECK = True
+        elif option == "--brief":
+            BRIEF = True
         elif option in ("-h", "--help"):
             usage()
             return 0
@@ -574,6 +789,7 @@ def main(argv):
         "marker": cmd_marker,
         "status": cmd_status,
         "gui": cmd_gui,
+        "normalise": cmd_normalise,
     }
     if command in ("", "-h", "--help", "help"):
         usage()
@@ -581,8 +797,8 @@ def main(argv):
     if command not in commands:
         usage(sys.stderr)
         die(f"Unknown command: {command}")
-    commands[command]()
-    return 0
+    result = commands[command]()
+    return result if result is not None else 0
 
 
 if __name__ == "__main__":

@@ -43,13 +43,27 @@ pkg-config
 python3-pip
 shellcheck
 
+#   direnv - loads the per-tree .envrc that selects the company Maven settings
+#            (capability.multi-company-build.md). guest-install.sh hooks it into
+#            /etc/bash.bashrc; the payload direnv.toml whitelists the .envrc files.
+direnv
+
+# Diagnostics
+#   strace         - system call tracing; how the setgid seccomp fault was found.
+#   bind9-dnsutils - dig and nslookup, for the split-horizon DNS checks.
+strace
+bind9-dnsutils
+
 # Data disk encryption + SMB file sharing
 #   cryptsetup-bin - the cryptsetup CLI only.
 #   samba          - serves the platform data root to the Windows host.
 #   psmisc         - fuser, used by `data-disk lock`.
+#   acl            - getfacl/setfacl, to find and clear POSIX ACLs that Samba
+#                    wrote before `nt acl support = no` (capability.data-synchronisation.md).
 cryptsetup-bin
 samba
 psmisc
+acl
 
 # Syncthing replication of shared data
 #   procps       - the only dependency of syncthing_*_amd64.deb beyond libc6.
@@ -83,3 +97,6 @@ libncurses6
 #                  driver into /etc/odbcinst.ini.
 unixodbc
 odbcinst
+#   unixodbc-dev - the sql.h/sqlext.h headers a `pip install pyodbc` source
+#                  build compiles against.
+unixodbc-dev

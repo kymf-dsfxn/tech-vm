@@ -29,8 +29,12 @@ document - the rationale lives there, not in READMEs or code comments:
   serves its share over SMB, and reads the host drives over HGFS at
   /mnt/C, /mnt/X, /mnt/S.
 
-Three more capabilities define what the built VM is for as a development
+Four more capabilities define what the built VM is for as a development
 machine:
+
+- `capability.multi-company-build.md` - one guest, three companies: the
+  neutral Maven default, a settings file and local repository per company
+  selected by direnv, and the git author identity selected by directory tree.
 
 - `capability.db-development-ase.md` - C, Python and command-line development
   against SAP ASE: Open Client (`isql`, `bcp`, CT-Lib), the ODBC driver

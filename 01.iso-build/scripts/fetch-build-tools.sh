@@ -11,9 +11,9 @@
 # committed, because *.deb is git-ignored: the pin below is what makes the
 # version reproducible from a clean clone.
 #
-# syft, shfmt and d2 refetch only when their pins below change. uv defaults to
-# "latest", resolved at run time, so a rerun can change the staged uv unless
-# --uv-version pins it.
+# Every tool is pinned below, so a rerun stages the same binaries.
+# --uv-version latest still resolves the newest uv at run time, for a deliberate
+# bump: run it once, test, then copy the version it reports into UV_VERSION.
 #
 # Requirements: curl, tar, sha256sum.
 #
@@ -21,7 +21,7 @@
 #   ./fetch-build-tools.sh [--uv-version <X.Y.Z|latest>] [--out <dir>]
 #
 # Defaults:
-#   --uv-version  latest
+#   --uv-version  the UV_VERSION pin below
 #   --out         ../.cache/build-tools
 
 set -euo pipefail
@@ -58,9 +58,9 @@ SYNCTHING_SHA256="ed148130661a27cd3961fda58bd91c17b205fa3d7ab312a1d6cbf21e59731f
 SYNCTHING_DEB="syncthing_${SYNCTHING_VERSION}_amd64.deb"
 SYNCTHING_URL="https://github.com/syncthing/syncthing/releases/download/v${SYNCTHING_VERSION}/${SYNCTHING_DEB}"
 
-# uv: version resolved at build time unless pinned; integrity checked against
-# the release-published .sha256 sidecar.
-UV_VERSION="latest"
+# uv: pinned like the others, so two builds of one recipe stage the same uv.
+# Integrity is checked against the release-published .sha256 sidecar.
+UV_VERSION="0.12.5"
 UV_TRIPLE="x86_64-unknown-linux-gnu"
 
 OUT_DIR="${BUILD_DIR}/.cache/build-tools"

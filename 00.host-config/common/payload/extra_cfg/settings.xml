@@ -1,46 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Neutral default: no mirrors, plain Maven Central, default local repository.
+     Company contexts are in settings-tieto.xml and settings-qfree.xml, selected
+     per directory tree by MAVEN_ARGS in .envrc (direnv).
+     Design: tech-vm capability.multi-company-build.md -->
 <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
           xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
- <mirrors>
-<mirror>
-    <id>qf-nexus</id>
-    <mirrorOf>*</mirrorOf>
-    <url>https://nexus.q-free.com/content/groups/public</url>
-</mirror>
- </mirrors>
- <profiles>
-<profile>
-    <id>qfnexus</id>
-    <repositories>
-        <repository>
-            <id>central</id>
-            <url>http://central</url>
-            <releases>
-                <enabled>true</enabled>
-            </releases>
-            <snapshots>
-                <enabled>true</enabled>
-            </snapshots>
-        </repository>
-    </repositories>
-
-    <pluginRepositories>
-        <pluginRepository>
-            <id>central</id>
-            <url>http://central</url>
-            <releases>
-                <enabled>true</enabled>
-            </releases>
-            <snapshots>
-                <enabled>true</enabled>
-            </snapshots>
-        </pluginRepository>
-    </pluginRepositories>
-</profile>
- </profiles>
-
-<activeProfiles>
-    <activeProfile>qfnexus</activeProfile>
-</activeProfiles>
 </settings>

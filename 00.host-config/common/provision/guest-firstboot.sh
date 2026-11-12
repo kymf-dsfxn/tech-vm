@@ -42,6 +42,11 @@ SMB_SHARE="${PLATFORM_NAMESPACE}"
 # One level below the data root, so the sibling state directory is never
 # served.
 SMB_PATH="${PLATFORM_DATA_SHARE:-${DATA_MOUNT}/share}"
+# Optional per-host list of names the share hides from the Windows host. No
+# host ships one: by default the share serves the whole tree, and the LUKS
+# unlock is what gates it. Design: capability.host-data-access.md, "What the
+# share serves".
+SMB_VETO_LIST="${VM_INIT_DIR}/extra_cfg/smb-veto.list"
 
 # Marker name resolved by the shared module (platform_node.py owns the
 # fallback literal), so there is one source of truth. The `|| true` is
@@ -116,6 +121,25 @@ info "Data disk state: ${DATA_STATE}"
 # smbpasswd is interactive - the operator sets it over SSH
 # (`sudo smbpasswd -a kymf`).
 log "Configure the ${SMB_SHARE} SMB share"
+# Always hidden: the folder marker (a client tidy-up must not delete the guard)
+# and the versioner's tree (owned by stsync, so the named user cannot delete
+# in it anyway). Then each name from the per-host list. Samba matches a veto
+# name at any depth and cannot express a path, so a name holding / is refused.
+SMB_VETO="/${MARKER_NAME}/.stversions/"
+if [[ -r "${SMB_VETO_LIST}" ]]; then
+    while IFS= read -r veto_name || [[ -n "${veto_name}" ]]; do
+        veto_name="${veto_name%%#*}"
+        veto_name="${veto_name#"${veto_name%%[![:space:]]*}"}"
+        veto_name="${veto_name%"${veto_name##*[![:space:]]}"}"
+        [[ -z "${veto_name}" ]] && continue
+        if [[ "${veto_name}" == */* ]]; then
+            info "WARNING: ${SMB_VETO_LIST}: '${veto_name}' holds a /, skipped"
+            continue
+        fi
+        SMB_VETO+="${veto_name}/"
+    done < "${SMB_VETO_LIST}"
+    info "Per-host veto list applied: ${SMB_VETO}"
+fi
 if [[ -f "${SMB_CONF}" ]]; then
     if grep -q "^\[${SMB_SHARE}\]" "${SMB_CONF}"; then
         info "[${SMB_SHARE}] already present in ${SMB_CONF}"
@@ -130,12 +154,23 @@ if [[ -f "${SMB_CONF}" ]]; then
    browseable = yes
    create mask = 0664
    directory mask = 2775
+   # Every SMB write matches the platform model, even below a directory that
+   # lost its setgid bit: group ${PLATFORM_CORE_USER}, files 0664, directories 2775.
+   force group = ${PLATFORM_CORE_USER}
+   force create mode = 0664
+   force directory mode = 2775
+   # Office copies the Windows security descriptor on save. With NT ACL support
+   # on, Samba maps it to a POSIX ACL whose mask shows as group mode bits
+   # (0674), and Syncthing replicates those bits. Off, the save keeps the modes
+   # above. Design: capability.encrypted-datadisk.md, "Samba".
+   nt acl support = no
    # Refuse the connection unless the data disk is unlocked. The test is on
    # the mount: a bare mountpoint has no share to serve.
    root preexec = /usr/bin/findmnt --mountpoint ${DATA_MOUNT}
    root preexec close = yes
-   # Hide the Syncthing folder marker and refuse to delete it.
-   veto files = /${MARKER_NAME}/
+   # Hidden and undeletable: the folder marker, .stversions, and any per-host
+   # names (see SMB_VETO above).
+   veto files = ${SMB_VETO}
 EOF
         info "Appended [${SMB_SHARE}] to ${SMB_CONF}"
     fi

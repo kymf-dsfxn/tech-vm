@@ -25,6 +25,42 @@ The historical note: HGFS was once disabled outright, when the old
 - it must live on the guest's encrypted disk, not on host shares - and it
 still holds. HGFS returns here for host data only, travelling the other way.
 
+## What the share serves
+
+The SMB share serves the whole tree, `/srv/dsfxn/share`, on every host. The
+gate is the data disk: the share answers only while the disk is unlocked, and
+only the key holder unlocks it. Each exposure is therefore a deliberate act by
+that person, and the default is to share everything.
+
+A per-host veto list exists for the case where that default is wrong for one
+VM. The usual case is a Windows host that belongs to a client. Its endpoint
+security agents read and tag files over SMB - measured on two hosts:
+Microsoft endpoint DLP (`user.$KERNEL.SEC.ENDPOINTDLP`), Mark of the Web, and
+on one host Windows application control (`user.$KERNEL.SMARTLOCKER.*`) -
+across personal and other clients' folders alike. The tags do not replicate,
+so they do not affect the share. What they show is that the Windows host's
+tooling reaches every file the share serves.
+
+The mechanism:
+
+- File: `00.host-config/<host>/payload/extra_cfg/smb-veto.list`. The ISO
+  build merges the per-host `payload/` over the common one, and the file
+  lands at `/opt/vm-init/extra_cfg/smb-veto.list`.
+- Format: one name per line. Blank lines and `#` comments are ignored.
+- Effect: `guest-firstboot.sh` appends each name to `veto files` in the
+  `[dsfxn]` stanza, after the folder marker and `.stversions`. A vetoed name
+  is invisible to the Windows host and cannot be created or deleted from it.
+- Samba matches a veto name at any depth, not only at the top of the share,
+  and cannot express a path. Choose names that are unique in the tree, such
+  as `00.kymf` or `01.disfixian-solutions`. A name that holds `/` is refused
+  with a warning.
+- Absent or empty file: nothing is added. No host ships one.
+
+The stanza is written once, at first boot. To change the list on a running
+VM, edit `veto files` in `/etc/samba/smb.conf` and run
+`sudo smbcontrol smbd reload-config`, and make the same change in the
+repository so the next image agrees.
+
 ## Convention
 
 | Host drive | Share name | Guest mountpoint | Access | Presence |

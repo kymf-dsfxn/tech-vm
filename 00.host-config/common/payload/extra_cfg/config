@@ -1,22 +1,25 @@
+# Keys are per-node copies in ~/.ssh/keys, made from the share by
+# ssh-keys-sync at `data-disk unlock`. Never point IdentityFile into the share.
+
 # Repos for dsfxn
 Host github-dsfxn
     HostName github.com
     User git
-    IdentityFile /srv/dsfxn/share/00.kymf/security-keys/ssh/kymf/kymf.disfixian-github.id_ed25519
+    IdentityFile ~/.ssh/keys/kymf.disfixian-github.id_ed25519
     IdentitiesOnly yes
 
 # Repo qfree
 Host github-qf
     HostName github.com
     User git
-    IdentityFile /srv/dsfxn/share/02.clients/qf/security-keys/ssh/qfree-git/id_eddsa.kym.farrell@q-free.com.openssh-private
+    IdentityFile ~/.ssh/keys/id_eddsa.kym.farrell@q-free.com.openssh-private
     IdentitiesOnly yes
 
 # Repo tieto
 Host github-tb
     HostName github.com
     User git
-    IdentityFile /srv/dsfxn/share/02.clients/tb/security-keys/ssh/tb-git/kymf.tb-github.id_ed25519
+    IdentityFile ~/.ssh/keys/kymf.tb-github.id_ed25519
     IdentitiesOnly yes
 
 # Tunnels

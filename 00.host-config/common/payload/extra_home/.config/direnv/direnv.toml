@@ -1,0 +1,17 @@
+# ~/.config/direnv/direnv.toml - installed by guest-install.sh (home overlay).
+#
+# Trust the two company .envrc files without a per-node `direnv allow`. direnv
+# keys an allow record on the file's path and content, and keeps it on each
+# node. Every .envrc edit that syncs in from another node would otherwise revoke
+# the allow on every other node until someone re-ran `direnv allow` there.
+#
+# The cost: a peer that edits one of these files runs code on every node. That
+# is the trust level the share already has, because it holds scripts the named
+# user runs. Keep the list to exact paths, never a prefix.
+# Design: tech-vm capability.multi-company-build.md.
+
+[whitelist]
+exact = [
+  "/srv/dsfxn/share/10.dev/10.repos/gh-qf/.envrc",
+  "/srv/dsfxn/share/10.dev/10.repos/gh-tb/.envrc",
+]

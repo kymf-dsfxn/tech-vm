@@ -18,3 +18,18 @@
 # are as trustworthy as the accounts on the encrypted disk, which they are.
 [safe]
 	directory = /srv/dsfxn/share/*
+
+# Author identity follows the company tree, on every host and with no shell
+# hook. Each include file is in the named user's home overlay
+# (~/.config/git/identity-*.inc). The trailing / matches every repository below
+# the tree. useConfigOnly stops git inventing an identity from the host name, so
+# a commit outside the three trees fails until the repository sets its own.
+# Design: tech-vm capability.multi-company-build.md.
+[user]
+	useConfigOnly = true
+[includeIf "gitdir:/srv/dsfxn/share/10.dev/10.repos/gh-qf/"]
+	path = ~/.config/git/identity-qf.inc
+[includeIf "gitdir:/srv/dsfxn/share/10.dev/10.repos/gh-tb/"]
+	path = ~/.config/git/identity-tb.inc
+[includeIf "gitdir:/srv/dsfxn/share/10.dev/10.repos/gh-dsfxn/"]
+	path = ~/.config/git/identity-dsfxn.inc

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# =============================================================================
+# ssh-keys-sync - copy the SSH private keys from the share to ~/.ssh/keys.
+#
+# The share is the store for the keys, and Syncthing replicates them. It is not
+# the path ssh reads: ownership does not replicate, so a key in the share is
+# owned by stsync on most nodes. OpenSSH refuses a key that the user owns at a
+# group-readable mode, and a 0600 key that stsync owns is unreadable to the
+# user. A per-node copy at 0600, owned by the user, avoids both. The share
+# copies stay 0640, readable through group dsfxn.
+#
+# `data-disk unlock` runs this as the named user. Run it by hand after a key
+# changes in the share. Safe to repeat. Exit 1 if any key could not be copied.
+# Design: tech-vm capability.data-synchronisation.md, "SSH keys".
+# =============================================================================
+
+set -euo pipefail
+
+DATA_ROOT="/srv/dsfxn"
+SHARE="${DATA_ROOT}/share"
+
+# Share-relative paths. ~/.ssh/config names each key by its file name under
+# ~/.ssh/keys, so a key added here also needs its IdentityFile line there.
+KEYS=(
+    "00.kymf/security-keys/ssh/kymf/kymf.disfixian-github.id_ed25519"
+    "02.clients/qf/security-keys/ssh/qfree-git/id_eddsa.kym.farrell@q-free.com.openssh-private"
+    "02.clients/tb/security-keys/ssh/tb-git/kymf.tb-github.id_ed25519"
+)
+
+# HOME from the passwd entry, not the environment, so the copy lands in the
+# right place however the caller switched user.
+USER_NAME="$(id -un)"
+USER_HOME="$(getent passwd "${USER_NAME}" | cut -d: -f6)"
+DEST="${USER_HOME}/.ssh/keys"
+
+if ! findmnt -rn --mountpoint "${DATA_ROOT}" > /dev/null; then
+    echo "ssh-keys-sync: ${DATA_ROOT} is not mounted. Run: sudo data-disk unlock" >&2
+    exit 1
+fi
+
+umask 0077
+install -d -m 0700 "${USER_HOME}/.ssh" "${DEST}"
+
+rc=0
+for key in "${KEYS[@]}"; do
+    src="${SHARE}/${key}"
+    dst="${DEST}/${key##*/}"
+    if [[ ! -e "${src}" ]]; then
+        echo "    absent:     ${src}" >&2
+        rc=1
+    elif [[ ! -r "${src}" ]]; then
+        echo "    unreadable: ${src} ($(stat -c '%a %U:%G' "${src}"))" >&2
+        echo "                set it to 0640 on the node where ${USER_NAME} owns it" >&2
+        rc=1
+    elif cmp -s "${src}" "${dst}"; then
+        echo "    current:    ${dst##*/}"
+    else
+        install -m 0600 "${src}" "${dst}"
+        echo "    copied:     ${dst##*/}"
+    fi
+done
+exit "${rc}"
