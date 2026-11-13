@@ -69,10 +69,20 @@ log "Configure APT (offline, on-ISO repo)"
 install -m 0644 "${PAYLOAD_CFG}/apt-minimal.conf" /etc/apt/apt.conf.d/99minimal
 
 # Local flat repo. [trusted=yes] because the debs are staged, not signed.
-printf 'deb [trusted=yes] file://%s ./\n' "${APT_REPO_DIR}" \
-    > /etc/apt/sources.list.d/vm-init-local.list
-# Offline: only the local repo is reachable. Do not fail if other sources 404.
-apt-get -o Acquire::Retries=0 update || true
+APT_LOCAL_LIST=/etc/apt/sources.list.d/vm-init-local.list
+printf 'deb [trusted=yes] file://%s ./\n' "${APT_REPO_DIR}" > "${APT_LOCAL_LIST}"
+# Every apt-get below reads the local repo and nothing else. The target also
+# lists the Ubuntu archive, and the installer may have fetched its indexes. If
+# apt sees them, it picks the newer -updates versions and tries to download
+# them: on a node with no route out, every fetch waits out its timeout. The
+# options leave the archive entries in place for unattended-upgrades after
+# first boot; List-Cleanup=0 keeps their index files.
+APT_LOCAL=(
+    -o "Dir::Etc::sourcelist=${APT_LOCAL_LIST}"
+    -o "Dir::Etc::sourceparts=-"
+    -o "APT::Get::List-Cleanup=0"
+)
+apt-get "${APT_LOCAL[@]}" update
 
 # --- Recovery user: shift to UID/GID 404 -------------------------------------
 log "Shift recovery user to UID/GID 404"
@@ -90,7 +100,7 @@ sed -i '/[[:space:]]swap[[:space:]]/d' /etc/fstab
 log "Install packages from the on-ISO repo"
 mapfile -t PKGS < <(grep -vE '^\s*(#|$)' "${PACKAGES_LIST}")
 info "Installing: ${PKGS[*]}"
-apt-get install -y --no-install-recommends "${PKGS[@]}"
+apt-get "${APT_LOCAL[@]}" install -y --no-install-recommends "${PKGS[@]}"
 
 # --- Mask nmbd ---------------------------------------------------------------
 # smb.conf sets `disable netbios = yes`, so nmbd has nothing to serve. Masked
@@ -561,7 +571,7 @@ info "storage.conf: graphroot=${PLATFORM_DATA_ROOT}/podman-storage runroot=/run/
 log "Install company CA certificate"
 CA_DEB="$(find "${PAYLOAD_DEB}" -maxdepth 1 -name 'ca-certificates-qfree_*_all.deb' | head -1)"
 if [[ -n "${CA_DEB}" ]]; then
-    apt-get install -y "${CA_DEB}"
+    apt-get "${APT_LOCAL[@]}" install -y "${CA_DEB}"
     info "Installed ${CA_DEB##*/}"
 else
     info "No CA .deb in payload, skipping"
@@ -575,7 +585,7 @@ fi
 log "Install Syncthing from the payload .deb"
 SYNCTHING_DEB="$(find "${PAYLOAD_DEB}" -maxdepth 1 -name 'syncthing_*_amd64.deb' | head -1)"
 if [[ -n "${SYNCTHING_DEB}" ]]; then
-    apt-get install -y "${SYNCTHING_DEB}"
+    apt-get "${APT_LOCAL[@]}" install -y "${SYNCTHING_DEB}"
     install -m 0755 "${VM_INIT_DIR}/sync-node" /usr/local/bin/sync-node
     install -d -m 0755 /etc/syncthing
     install -m 0644 "${PAYLOAD_CFG}/syncthing/node-config.xml.template" \
