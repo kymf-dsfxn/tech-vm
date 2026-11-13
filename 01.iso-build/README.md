@@ -40,8 +40,22 @@ Each script's header documents its options; `build-custom-iso.sh` also honours
 Offline install needs every package on the ISO, because the base pool does not
 hold them all. `build-package-repo.sh` resolves the closure of
 `00.host-config/common/packages.list` inside a container that matches the
-target release, so the resolved versions match what the guest gets. The
-interface to the rest of the build is stable - a repo directory with a
+target release.
+
+The closure is resolved against the release pocket alone, with an empty dpkg
+status, so the repository holds every package the list needs at the version
+the stock release ISO was built from. Both halves matter. The guest's base
+system is installed from that ISO, so it holds release versions. A closure
+taken from `-updates` mixes in newer packages that pin newer base libraries
+exactly (`libssl-dev` pins `libssl3t64`), and an ordinary `--download-only`
+skips every library the container image already has, so the newer library
+never reaches the repository. The offline install then stops with unmet
+dependencies, apt exit code 100. Measured on 2026-11-13: `libpq-dev` from
+`-updates` needed `libssl3t64 3.5.5-1ubuntu3.7`, and the guest had the release
+`3.5.5-1ubuntu3`. Updates arrive after install, through `unattended-upgrades`
+(see `00.host-config/README.md`).
+
+The interface to the rest of the build is stable - a repo directory with a
 `Packages` index - so the build-time fetch could later be replaced by a managed
 repository artefact without touching anything downstream.
 

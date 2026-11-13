@@ -7,6 +7,15 @@
 # Resolution runs in a container matching the target release so the closure
 # is computed against the right archive.
 #
+# The closure is resolved against the release pocket only, as if nothing were
+# installed. The guest's base system comes from the stock release ISO, so it
+# holds release versions. A closure taken from -updates or -security mixes in
+# newer packages that pin newer base libraries exactly (libssl-dev pins
+# libssl3t64, for example), and an ordinary --download-only skips any library
+# the container image already has. The offline install then fails with unmet
+# dependencies (apt exit 100). Release versions match the ISO; the guest's
+# unattended-upgrades applies the updates once it has a network.
+#
 # Requirements: docker or podman.
 #
 # Usage:
@@ -60,15 +69,29 @@ echo "Image:    ${IMAGE}"
 echo "Packages: ${PKGS[*]}"
 echo "Out:      ${OUT_ABS}"
 
-# Inside the container: update, install dpkg-dev for the indexer, download the
-# closure of the requested packages into the mounted repo, then build the index.
+# Inside the container: install dpkg-dev for the indexer from the image's own
+# sources, then switch apt to the release pocket alone and download the full
+# closure (empty dpkg status, so nothing counts as installed) into the mounted
+# repo, then build the index.
 "${ENGINE}" run --rm -v "${OUT_ABS}:/repo" "${IMAGE}" bash -c '
   set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends dpkg-dev
+
+  . /etc/os-release
+  rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*
+  printf "%s\n" "Types: deb" "URIs: http://archive.ubuntu.com/ubuntu/" \
+    "Suites: ${VERSION_CODENAME}" "Components: main restricted universe multiverse" \
+    "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg" \
+    > /etc/apt/sources.list.d/release.sources
+  rm -rf /var/lib/apt/lists/*
+  apt-get update
+  echo "Resolving against ${VERSION_CODENAME} (release pocket only)"
+
   rm -rf /repo/pool && mkdir -p /repo/pool
   apt-get install -y --no-install-recommends --download-only \
+    -o Dir::State::status=/dev/null \
     -o Dir::Cache::archives="/repo/pool" '"${PKGS[*]}"'
   # Drop apt lock/partial artefacts, keep only .deb
   find /repo/pool -maxdepth 1 -type f ! -name "*.deb" -delete || true
