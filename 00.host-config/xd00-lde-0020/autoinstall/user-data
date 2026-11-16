@@ -23,11 +23,15 @@ autoinstall:
           addresses:
             - 10.66.82.2
 
+  #  The OS goes on the disk in VMware slot scsi0:0, where create-vm-instance.py
+  #  puts the core disk. By slot, not size: the data disk (scsi0:1) can be any
+  #  size. No disk in the slot stops the install; it never picks another disk.
+  #  data-disk finds the data disk by the same rule (platform_node.py).
   storage:
     layout:
       name: direct
       match:
-        size: smallest
+        id_path: "*-scsi-0:0:0:0"
 
   identity:
     hostname: xd00-lde-0020

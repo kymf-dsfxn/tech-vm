@@ -10,12 +10,14 @@ capability.encrypted-datadisk.md, capability.data-synchronisation.md.
 
 Also a small CLI so bash callers share the code instead of duplicating it:
 
+  platform_node.py data-device
   platform_node.py state --device /dev/sdb --partition /dev/sdb1 \\
       --mapper /dev/mapper/dsfxn_data --mount /srv/dsfxn
   platform_node.py marker-name [--config PATH] [--template PATH]
 """
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -29,6 +31,14 @@ PLATFORM_ENV_PATH = "/etc/platform.env"
 # The seven-state disk vocabulary, in classifier test order.
 STATES = ("absent", "unlocked", "opened", "occupied", "uninitialised",
           "unknown", "locked")
+
+# The data disk is the disk in VMware slot scsi0:1, found by its udev path
+# rather than its kernel name. create-vm-instance.py writes the core disk to
+# scsi0:0 and the data disk to scsi0:1, and the autoinstall matches the core
+# disk by the same rule (`id_path: "*-scsi-0:0:0:0"`). The glob leaves out the
+# PCI address, which depends on the virtual hardware. One SCSI controller only:
+# a second one has its own target 1, and the match becomes ambiguous.
+DATA_DISK_BY_PATH = "/dev/disk/by-path/*-scsi-0:0:1:0"
 
 # Fallbacks only; the live values come from the rendered config or template.
 MARKER_NAME_DEFAULT = ".dsfxn-share-marker"
@@ -76,6 +86,30 @@ def derived(env):
         "named_user": env.get("PLATFORM_NAMED_USER") or "kymf",
         "luks_name": f"{namespace}_data",
     }
+
+
+# -- Data disk device ------------------------------------------------------
+
+class DataDeviceError(RuntimeError):
+    """More than one disk answers to the data slot."""
+
+
+def data_device(pattern=DATA_DISK_BY_PATH):
+    """Kernel name of the disk in the data slot, e.g. /dev/sdb. With the slot
+    empty, the pattern itself: no block device has that name, so every caller
+    classifies the disk `absent` without a special case."""
+    hits = sorted(glob.glob(pattern))
+    if len(hits) > 1:
+        raise DataDeviceError(
+            f"{len(hits)} disks match {pattern}: " + ", ".join(hits))
+    if not hits:
+        return pattern
+    return os.path.realpath(hits[0])
+
+
+def partition_of(device):
+    """First partition of a disk: sdb -> sdb1, nvme0n1 -> nvme0n1p1."""
+    return f"{device}p1" if device[-1:].isdigit() else f"{device}1"
 
 
 # -- Disk state ------------------------------------------------------------
@@ -304,6 +338,10 @@ def _cli(argv):
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser(
+        "data-device",
+        help="print the data disk and its partition, by VMware slot scsi0:1")
+
     p_state = sub.add_parser(
         "state", help="print the disk state (" + " / ".join(STATES) + ")")
     p_state.add_argument("--device", required=True)
@@ -318,7 +356,14 @@ def _cli(argv):
     p_marker.add_argument("--template", default=SYNC_TEMPLATE_PATH)
 
     args = parser.parse_args(argv)
-    if args.command == "state":
+    if args.command == "data-device":
+        try:
+            device = data_device()
+        except DataDeviceError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        print(device, partition_of(device))
+    elif args.command == "state":
         print(disk_state(args.device, args.partition, args.mapper, args.mount))
     elif args.command == "marker-name":
         print(marker_name_configured(args.config, args.template))

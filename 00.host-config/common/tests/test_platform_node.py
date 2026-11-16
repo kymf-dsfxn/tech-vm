@@ -97,6 +97,51 @@ class DiskStateTests(unittest.TestCase):
              "unknown", "locked"))
 
 
+class DataDeviceTests(unittest.TestCase):
+    """The data disk by slot. by-path links point at the kernel node; plain
+    files stand in for the nodes, realpath does not care."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.pattern = os.path.join(self.root, "*-scsi-0:0:1:0")
+
+    def _slot(self, link, target):
+        node = os.path.join(self.root, target)
+        open(node, "w").close()
+        os.symlink(node, os.path.join(self.root, link))
+        return node
+
+    def test_slot_resolves_to_the_kernel_node(self):
+        self._slot("pci-0000:03:00.0-scsi-0:0:0:0", "sda")
+        node = self._slot("pci-0000:03:00.0-scsi-0:0:1:0", "sdb")
+        self.assertEqual(pn.data_device(self.pattern), node)
+
+    def test_follows_the_slot_not_the_name(self):
+        # The kernel named them the other way round: the slot still decides.
+        self._slot("pci-0000:03:00.0-scsi-0:0:0:0", "sdb")
+        node = self._slot("pci-0000:03:00.0-scsi-0:0:1:0", "sda")
+        self.assertEqual(pn.data_device(self.pattern), node)
+
+    def test_empty_slot_classifies_absent(self):
+        self._slot("pci-0000:03:00.0-scsi-0:0:0:0", "sda")
+        device = pn.data_device(self.pattern)
+        self.assertEqual(device, self.pattern)
+        probes = pn.DiskProbes()
+        self.assertEqual(
+            pn.disk_state(device, pn.partition_of(device), MAPPER, MOUNT, probes),
+            "absent")
+
+    def test_two_controllers_are_refused(self):
+        self._slot("pci-0000:03:00.0-scsi-0:0:1:0", "sdb")
+        self._slot("pci-0000:0b:00.0-scsi-0:0:1:0", "sdc")
+        with self.assertRaises(pn.DataDeviceError):
+            pn.data_device(self.pattern)
+
+    def test_partition_names(self):
+        self.assertEqual(pn.partition_of("/dev/sdb"), "/dev/sdb1")
+        self.assertEqual(pn.partition_of("/dev/nvme0n1"), "/dev/nvme0n1p1")
+
+
 class PlatformEnvTests(unittest.TestCase):
     def _write(self, text):
         handle = tempfile.NamedTemporaryFile(

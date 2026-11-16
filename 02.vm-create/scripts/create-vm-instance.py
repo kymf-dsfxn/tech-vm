@@ -405,19 +405,17 @@ def validate_settings(s, strict=False):
         if not resolved_source.lower().endswith(".vmdk"):
             raise SettingError(f"DataDiskSourcePath must be a .vmdk file: {resolved_source}")
 
-    # The autoinstall puts the OS on the smallest disk (user-data
-    # `match: size: smallest`). A new data disk that is not larger than the
-    # core disk gets the OS instead, and the guest's data-disk then sees the
-    # OS disk at /dev/sdb.
+    warnings = []
+    # The autoinstall picks the OS disk by slot (scsi0:0), so sizes no longer
+    # decide it. Still a warning: an ISO built before 2.5.0 matched the
+    # smallest disk and would install onto a smaller data disk.
     if s["DataDiskCount"] >= 1 and not source_path \
             and s["DataDiskSizeGB"] <= s["CoreDiskSizeGB"]:
-        raise SettingError(
-            f"DataDiskSizeGB ({s['DataDiskSizeGB']}) must be larger than "
-            f"CoreDiskSizeGB ({s['CoreDiskSizeGB']}): the installer puts the OS "
-            "on the smallest disk."
+        warnings.append(
+            f"DataDiskSizeGB ({s['DataDiskSizeGB']}) is not larger than "
+            f"CoreDiskSizeGB ({s['CoreDiskSizeGB']}). Use only a 2.5.0 or later "
+            "ISO: older ISOs install the OS on the smallest disk."
         )
-
-    warnings = []
     if s["CoresPerSocket"] and (s["CpuCount"] % s["CoresPerSocket"]) != 0:
         warnings.append(
             f"CpuCount ({s['CpuCount']}) is not divisible by CoresPerSocket ({s['CoresPerSocket']})."

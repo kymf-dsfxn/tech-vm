@@ -26,8 +26,13 @@ except pn.PlatformEnvError:
 _D = pn.derived(_ENV)
 
 NAMESPACE = _D["namespace"]
-DATA_DEV = "/dev/sdb"
-DATA_PART = f"{DATA_DEV}1"
+# By VMware slot (scsi0:1), not by kernel name: see platform_node.data_device.
+try:
+    DATA_DEV = pn.data_device()
+except pn.DataDeviceError as exc:
+    print(f"FATAL: {exc}", file=sys.stderr)
+    sys.exit(1)
+DATA_PART = pn.partition_of(DATA_DEV)
 DATA_LUKS_NAME = _D["luks_name"]
 DATA_MAPPER = f"/dev/mapper/{DATA_LUKS_NAME}"
 DATA_MOUNT = _D["data_root"]
@@ -521,7 +526,7 @@ def cmd_status():
 
     _row("namespace", NAMESPACE)
     _row("state", state)
-    _row("device", f"{DATA_DEV} " + ("(present)" if dev_present() else "(absent)"))
+    _row("device", f"{DATA_DEV} " + ("(scsi0:1, present)" if dev_present() else "(absent)"))
     if state == "occupied":
         for line in _PROBES.mounts_on(DATA_DEV):
             _row("in use", line)

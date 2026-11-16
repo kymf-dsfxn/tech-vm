@@ -63,7 +63,8 @@ and is ported verbatim; deviations are listed in the port's commit message.
 
 - `data-disk init` invokes `sync-node marker --create --force`, tolerating
   failure with a warning.
-- `guest-firstboot.sh` invokes
+- `guest-firstboot.sh` invokes `platform_node.py data-device` (the data disk
+  and its partition on one line, exit 1 when the slot is ambiguous),
   `platform_node.py state --device ... --partition ... --mapper ... --mount ...`
   (one of the seven states on stdout) and
   `platform_node.py marker-name --template ...`.

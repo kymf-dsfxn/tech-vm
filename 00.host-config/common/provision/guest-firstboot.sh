@@ -30,8 +30,12 @@ PLATFORM_ENV="/etc/platform.env"
 
 NAMED_USER="kymf"
 
-DATA_DEV="/dev/sdb"
-DATA_PART="${DATA_DEV}1"
+# The data disk is the disk in VMware slot scsi0:1, resolved by
+# platform_node.py (one rule for data-disk and this script). Empty when the
+# slot is ambiguous; the state is then forced to unknown below.
+DATA_DEV=""
+DATA_PART=""
+read -r DATA_DEV DATA_PART < <(python3 /usr/local/bin/platform_node.py data-device 2> /dev/null) || true
 DATA_LUKS_NAME="${PLATFORM_NAMESPACE}_data"
 DATA_MOUNT="${PLATFORM_DATA_ROOT}"
 # Bare mountpoint mode while locked (the bare mountpoint invariant).
@@ -83,10 +87,15 @@ DATA_UUID=""
 
 install -d -o root -g root -m "${DATA_MOUNT_LOCKED_MODE}" "${DATA_MOUNT}"
 
-DATA_STATE="$(python3 /usr/local/bin/platform_node.py state \
-    --device "${DATA_DEV}" --partition "${DATA_PART}" \
-    --mapper "/dev/mapper/${DATA_LUKS_NAME}" --mount "${DATA_MOUNT}" \
-    2> /dev/null || echo unknown)"
+if [[ -n "${DATA_DEV}" ]]; then
+    DATA_STATE="$(python3 /usr/local/bin/platform_node.py state \
+        --device "${DATA_DEV}" --partition "${DATA_PART}" \
+        --mapper "/dev/mapper/${DATA_LUKS_NAME}" --mount "${DATA_MOUNT}" \
+        2> /dev/null || echo unknown)"
+else
+    info "More than one disk answers to slot scsi0:1 (platform_node.py data-device)"
+    DATA_STATE="unknown"
+fi
 
 case "${DATA_STATE}" in
     absent)

@@ -1,7 +1,8 @@
 # Capability: encrypted data disk
 
 The platform data root (`/srv/dsfxn`) lives on a LUKS-encrypted second disk
-(`/dev/sdb`), unlocked only by a deliberate operator action after an SSH login.
+(VMware slot `scsi0:1`, normally `/dev/sdb`), unlocked only by a deliberate
+operator action after an SSH login.
 This document is the design record. The implementation is
 `00.host-config/common/guest-bin/data-disk` (the operator command),
 `provision/guest-install.sh` (install-time mechanism),
@@ -90,13 +91,19 @@ The observable states are also tested first. A mounted filesystem means
 `unlocked` and an open mapper means `opened` whatever the header says, and both
 are readable by anyone, so only a disk that is neither needs the header at all.
 
+Both disks are chosen by VMware slot, not by size or kernel name.
+`create-vm-instance.py` puts the core disk in `scsi0:0` and the data disk in
+`scsi0:1`. The autoinstall installs the OS on the disk whose udev `ID_PATH`
+matches `*-scsi-0:0:0:0`, and stops if there is none. `platform_node.py
+data-device` resolves `/dev/disk/by-path/*-scsi-0:0:1:0` to the data disk for
+`data-disk` and `guest-firstboot.sh`, and refuses if two disks match (a second
+SCSI controller). Before 2.5.0 the autoinstall took the smallest disk, and a
+canary with a data disk smaller than its core disk got the OS on the data disk.
+
 A disk with anything else mounted from it is `occupied`, tested before the
-header for the same reason. This is the OS disk under the data disk's name: the
-autoinstall puts the OS on the smallest disk, so a data disk smaller than the
-core disk gets the OS, and its EFI partition has no LUKS header. Calling that
-`uninitialised` invites `init` onto the EFI partition. `init` refuses an
-`occupied` disk even with `--force`, and `create-vm-instance.py` refuses a new
-data disk that is not larger than the core disk.
+header for the same reason. This is the OS disk in the data slot: its EFI
+partition has no LUKS header, and calling that `uninitialised` invites `init`
+onto the EFI partition. `init` refuses an `occupied` disk even with `--force`.
 
 The state vocabulary is seven words - `absent` / `unlocked` / `opened` /
 `occupied` / `uninitialised` / `unknown` / `locked` - and there is exactly one classifier:

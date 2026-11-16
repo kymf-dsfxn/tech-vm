@@ -158,7 +158,7 @@ and artifact filenames, and changing them breaks things:
 The capabilities this tree implements are designed in their own documents at
 the repo root, and the rationale lives there:
 
-- **`../capability.encrypted-datadisk.md`** - `/dev/sdb` is LUKS encrypted,
+- **`../capability.encrypted-datadisk.md`** - the data disk (slot `scsi0:1`) is LUKS encrypted,
   never unlocked at boot, and holds the platform data root. `data-disk` is the
   operator lifecycle; services that consume the data root register in its
   `DATA_DISK_SERVICES` array and gate themselves with a systemd drop-in (the
