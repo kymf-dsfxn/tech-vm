@@ -68,15 +68,41 @@ log "Configure APT (offline, on-ISO repo)"
 # apt-minimal.conf carries the no-recommends/no-suggests pair.
 install -m 0644 "${PAYLOAD_CFG}/apt-minimal.conf" /etc/apt/apt.conf.d/99minimal
 
+# The node's own archive sources, for unattended-upgrades and guest-converge
+# after first boot. Written here, not left to the installer: the autoinstall
+# points the installer at a dummy mirror to force an offline install (see the
+# apt section of user-data), and the target may have inherited it.
+VERSION_CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
+cat > /etc/apt/sources.list.d/ubuntu.sources <<EOF
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: ${VERSION_CODENAME} ${VERSION_CODENAME}-updates ${VERSION_CODENAME}-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu/
+Suites: ${VERSION_CODENAME}-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+chmod 0644 /etc/apt/sources.list.d/ubuntu.sources
+# One-line-style entries the installer may have left beside it (the dummy
+# mirror, or a cdrom line) would duplicate or break those sources.
+if [[ -f /etc/apt/sources.list ]]; then
+    sed -i -E 's|^([[:space:]]*deb)|# disabled by guest-install.sh: \1|' /etc/apt/sources.list
+fi
+info "Archive sources for ${VERSION_CODENAME}: archive.ubuntu.com, security.ubuntu.com"
+
 # Local flat repo. [trusted=yes] because the debs are staged, not signed.
 APT_LOCAL_LIST=/etc/apt/sources.list.d/vm-init-local.list
 printf 'deb [trusted=yes] file://%s ./\n' "${APT_REPO_DIR}" > "${APT_LOCAL_LIST}"
-# Every apt-get below reads the local repo and nothing else. The target also
-# lists the Ubuntu archive, and the installer may have fetched its indexes. If
-# apt sees them, it picks the newer -updates versions and tries to download
-# them: on a node with no route out, every fetch waits out its timeout. The
-# options leave the archive entries in place for unattended-upgrades after
-# first boot; List-Cleanup=0 keeps their index files.
+# Every apt-get below reads the local repo and nothing else. The install is
+# offline and the base system holds release versions, which is what the local
+# repo holds. The archive sources above would offer newer -updates versions
+# and send apt to the network: on a node with no route out, every fetch waits
+# out its timeout. The options leave those sources in place for after first
+# boot; List-Cleanup=0 keeps any index files already fetched.
 APT_LOCAL=(
     -o "Dir::Etc::sourcelist=${APT_LOCAL_LIST}"
     -o "Dir::Etc::sourceparts=-"

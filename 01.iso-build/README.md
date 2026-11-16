@@ -55,6 +55,18 @@ dependencies, apt exit code 100. Measured on 2026-11-13: `libpq-dev` from
 `3.5.5-1ubuntu3`. Updates arrive after install, through `unattended-upgrades`
 (see `00.host-config/README.md`).
 
+The install must therefore be offline on every host, not only on hosts without
+a route out. When the installer reaches a mirror, it applies security updates
+to the target before the late-commands run, and autoinstall has no setting to
+stop that (`updates` takes only `security` or `all`). The target's libraries
+then outrun the repository, and the same exact pins fail. So each `user-data`
+names a dummy mirror, `http://127.0.0.1/ubuntu`, with `fallback:
+offline-install`. The mirror check is refused at once, and the installer goes
+offline without updates and without waiting on network timeouts.
+`guest-install.sh` then writes the node's real archive sources
+(`/etc/apt/sources.list.d/ubuntu.sources`), but installs from the on-ISO
+repository alone.
+
 The interface to the rest of the build is stable - a repo directory with a
 `Packages` index - so the build-time fetch could later be replaced by a managed
 repository artefact without touching anything downstream.

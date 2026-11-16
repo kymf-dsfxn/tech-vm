@@ -10,18 +10,33 @@ autoinstall:
   source:
     id: ubuntu-server-minimal
 
+  #  Install offline on every host, network or not. With a reachable mirror
+  #  the installer applies security updates before the late-commands, and the
+  #  target's libraries then outrun the release-only offline repo: an exact
+  #  pin such as libssl-dev -> libssl3t64 can no longer be met. The dummy
+  #  mirror is refused at once, so the installer falls back to an offline
+  #  install without waiting on timeouts. guest-install.sh writes the real
+  #  archive sources, and unattended-upgrades patches the node after first
+  #  boot. Design: 01.iso-build/README.md, "The offline apt repository".
+  apt:
+    geoip: false
+    fallback: offline-install
+    mirror-selection:
+      primary:
+        - uri: "http://127.0.0.1/ubuntu"
+
   network:
     version: 2
     ethernets:
       ens192:
         addresses:
-          - 10.66.80.100/24
+          - 10.66.81.100/24
         routes:
           - to: default
-            via: 10.66.80.2
+            via: 10.66.81.2
         nameservers:
           addresses:
-            - 10.66.80.2
+            - 10.66.81.2
 
   #  The OS goes on the disk in VMware slot scsi0:0, where create-vm-instance.py
   #  puts the core disk. By slot, not size: the data disk (scsi0:1) can be any
