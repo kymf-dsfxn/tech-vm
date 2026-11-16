@@ -23,17 +23,27 @@ and value ranges are in `--help`; this README covers the concepts.
 
 Every setting resolves in one order, highest first: a command-line value, then
 the matching key in the `--config` JSON file, then the built-in default. Config
-keys are PascalCase (`VmName`, `CpuCount`), command-line flags are kebab-case
-(`--vm-name`, `--cpu-count`). An explicit JSON `null` counts as absent, so the
+keys are PascalCase (`VmName`, `MemoryMB`), command-line flags are kebab-case
+(`--vm-name`, `--memory-mb`). An explicit JSON `null` counts as absent, so the
 sample file's `null` entries fall through to the defaults and a required key
 cannot be satisfied by `null`.
 
-The built-in defaults describe the standard shape: 4 vCPU, 12 GB RAM, PVSCSI,
+The built-in defaults describe the standard shape: 1 processor with 4 cores
+(4 vCPU), 12 GB RAM, PVSCSI,
 one 32 GB core disk plus one 512 GB data disk, `vmxnet3` on `nat`, UEFI with
 Secure Boot off, and the host drives C:, X:, S: shared into the guest over
 HGFS (`HostSharedDrives`, below). The shipped `vm-definitions/*.json` files
 override parts of that shape; the definition file is the record of what a host
 actually gets.
+
+## Processors and cores
+
+`ProcessorCount` and `CoresPerSocket` are the two fields of the Workstation
+processor dialog: "Number of processors" (sockets) and "Number of cores per
+processor". The script writes their product to `numvcpus`, the vCPU total, and
+`CoresPerSocket` to `cpuid.coresPerSocket`; Workstation derives the socket
+count from the two. `ProcessorCount 1` with `CoresPerSocket 6` gives one socket
+with 6 cores, 6 vCPUs. The older key `CpuCount` (the vCPU total) is refused.
 
 ## Creating a VM
 

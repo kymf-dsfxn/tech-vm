@@ -1,9 +1,9 @@
 {
   "VmName": "kymf-xd00-lde-0010",
   "VmRootPath": "C:\\local-data\\k-vm",
-  "CpuCount": 1,
-  "CoresPerSocket": 4,
-  "MemoryMB": 12288,
+  "ProcessorCount": 1,
+  "CoresPerSocket": 6,
+  "MemoryMB": 20480,
   "CoreDiskSizeGB": 32,
   "DataDiskCount": 1,
   "DataDiskSizeGB": 512,

@@ -254,7 +254,7 @@ def build_vmx_content(definition: dict) -> str:
     lines.append(_vmx_line("displayName", definition["DisplayName"]))
     lines.append(_vmx_line("guestOS", definition["GuestOs"]))
     lines.append(_vmx_line("firmware", definition["Firmware"]))
-    lines.append(_vmx_line("numvcpus", definition["CpuCount"]))
+    lines.append(_vmx_line("numvcpus", definition["NumVcpus"]))
     lines.append(_vmx_line("cpuid.coresPerSocket", definition["CoresPerSocket"]))
     lines.append(_vmx_line("memsize", definition["MemoryMB"]))
     lines.append(_vmx_line("bios.bootDelay", definition["BootDelayMs"]))

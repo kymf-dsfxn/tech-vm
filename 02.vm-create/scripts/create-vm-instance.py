@@ -33,7 +33,9 @@ _REDACT_KEYS = {"password", "secret", "token"}
 _SETTINGS = [
     ("VmName", "vm_name", "str", None, True),
     ("VmRootPath", "vm_root_path", "str", None, True),
-    ("CpuCount", "cpu_count", "int", 4, False),
+    # The VMware Workstation dialog: "Number of processors" (sockets) and
+    # "Number of cores per processor". The vCPU total is their product.
+    ("ProcessorCount", "processor_count", "int", 1, False),
     ("CoresPerSocket", "cores_per_socket", "int", 4, False),
     ("MemoryMB", "memory_mb", "int", 12288, False),
     ("CoreDiskSizeGB", "core_disk_size_gb", "int", 32, False),
@@ -59,7 +61,7 @@ _SETTINGS = [
 ]
 
 _RANGES = {
-    "CpuCount": (1, 256),
+    "ProcessorCount": (1, 256),
     "CoresPerSocket": (1, 256),
     "MemoryMB": (256, 2097152),
     "CoreDiskSizeGB": (1, 65535),
@@ -70,6 +72,8 @@ _RANGES = {
     "DisplayHeight": (480, 4320),
     "DisplayCount": (1, 8),
 }
+
+_MAX_VCPUS = 256
 
 _ALLOWED = {
     "NetworkType": ["bridged", "nat", "hostonly", "custom"],
@@ -184,8 +188,10 @@ def _add_domain_arguments(parser):
     iso_group.add_argument("--iso-dir", help="Directory of built ISOs; resolve and attach the newest")
     parser.add_argument("--iso-host", help="Host id to pick the ISO subdir/name under --iso-dir")
 
-    parser.add_argument("--cpu-count", type=int, help="Virtual CPUs" + rng("CpuCount"))
-    parser.add_argument("--cores-per-socket", type=int, help="Cores per socket" + rng("CoresPerSocket"))
+    parser.add_argument("--processor-count", type=int,
+                        help="Processors (sockets), as in the Workstation dialog" + rng("ProcessorCount"))
+    parser.add_argument("--cores-per-socket", type=int,
+                        help="Cores per processor; vCPUs = processors x cores" + rng("CoresPerSocket"))
     parser.add_argument("--memory-mb", type=int, help="Memory in MB" + rng("MemoryMB"))
     parser.add_argument("--core-disk-size-gb", type=int, help="Core disk size GB" + rng("CoreDiskSizeGB"))
     parser.add_argument("--data-disk-count", type=int, help="Number of data disks" + rng("DataDiskCount"))
@@ -281,7 +287,17 @@ def load_config(config_path):
     if not os.path.isfile(resolved):
         raise SettingError(f"Config file does not exist: {resolved}")
     with open(resolved, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        config = json.load(handle)
+    # CpuCount was the vCPU total, written straight to numvcpus. It read like
+    # the dialog's processor count, so CpuCount 1 with CoresPerSocket 6 gave
+    # one vCPU. Refuse it rather than ignore it.
+    if "CpuCount" in config:
+        raise SettingError(
+            f"{resolved}: CpuCount is replaced by ProcessorCount (sockets). "
+            "The vCPU total is ProcessorCount x CoresPerSocket. For one "
+            "processor with 6 cores, set ProcessorCount 1 and CoresPerSocket 6."
+        )
+    return config
 
 
 def resolve_settings(args, config):
@@ -416,9 +432,11 @@ def validate_settings(s, strict=False):
             f"CoreDiskSizeGB ({s['CoreDiskSizeGB']}). Use only a 2.5.0 or later "
             "ISO: older ISOs install the OS on the smallest disk."
         )
-    if s["CoresPerSocket"] and (s["CpuCount"] % s["CoresPerSocket"]) != 0:
-        warnings.append(
-            f"CpuCount ({s['CpuCount']}) is not divisible by CoresPerSocket ({s['CoresPerSocket']})."
+    vcpus = s["ProcessorCount"] * s["CoresPerSocket"]
+    if vcpus > _MAX_VCPUS:
+        raise SettingError(
+            f"ProcessorCount x CoresPerSocket ({s['ProcessorCount']} x "
+            f"{s['CoresPerSocket']} = {vcpus}) exceeds {_MAX_VCPUS} vCPUs."
         )
 
     if strict and warnings:
@@ -602,7 +620,9 @@ def _cmd_run(args, settings, resolved_vm_root, config):
         "DisplayName": settings["VmName"],
         "GuestOs": settings["GuestOs"],
         "Firmware": settings["Firmware"],
-        "CpuCount": str(settings["CpuCount"]),
+        # numvcpus is the vCPU total; Workstation derives the processor
+        # (socket) count as numvcpus / cpuid.coresPerSocket.
+        "NumVcpus": str(settings["ProcessorCount"] * settings["CoresPerSocket"]),
         "CoresPerSocket": str(settings["CoresPerSocket"]),
         "MemoryMB": str(settings["MemoryMB"]),
         "BootDelayMs": str(settings["BootDelayMs"]),
@@ -635,6 +655,8 @@ def _cmd_run(args, settings, resolved_vm_root, config):
     print(f"  {'VmxPath':<20} {vmx_path}")
     print(f"  {'ConfigPath':<20} {args.config or '(none)'}")
     print(f"  {'CoreDiskPath':<20} {core_disk_path}")
+    print(f"  {'Processors':<20} {settings['ProcessorCount']} x {settings['CoresPerSocket']} cores"
+          f" = {settings['ProcessorCount'] * settings['CoresPerSocket']} vCPUs")
     print(f"  {'DataDiskCount':<20} {settings['DataDiskCount']}")
     print(f"  {'IsoPath':<20} {resolved_iso or '(none)'}")
     print(f"  {'DiskCreationSkipped':<20} {bool(args.skip_disk_creation)}")
