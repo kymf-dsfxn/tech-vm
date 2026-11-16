@@ -73,9 +73,9 @@ if [[ -f "${SENTINEL}" ]]; then
 fi
 
 # --- Data disk: detect and record, never touch -------------------------------
-# Classification is the shared six-state classifier in platform_node.py, the
-# same code data-disk runs, so every surface speaks one vocabulary:
-# absent / unlocked / opened / uninitialised / unknown / locked.
+# Classification is the shared classifier in platform_node.py, the same code
+# data-disk runs, so every surface speaks one vocabulary:
+# absent / unlocked / opened / occupied / uninitialised / unknown / locked.
 log "Detect data disk ${DATA_DEV}"
 
 DATA_LUKS_UUID=""
@@ -99,6 +99,10 @@ case "${DATA_STATE}" in
     opened)
         info "${DATA_LUKS_NAME} is open but not mounted"
         info "Mount it over SSH: sudo data-disk unlock"
+        ;;
+    occupied)
+        info "${DATA_DEV} holds mounted filesystems, so it is not a data disk"
+        info "The OS is probably installed on it. Check lsblk; do not run data-disk init"
         ;;
     uninitialised)
         info "${DATA_DEV} has no LUKS header yet"

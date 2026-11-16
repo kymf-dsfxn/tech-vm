@@ -330,6 +330,14 @@ def cmd_init():
         die(f"{DATA_MOUNT} is mounted. Run 'data-disk lock' first.")
     if is_open():
         die(f"{DATA_LUKS_NAME} is open. Run 'data-disk lock' first.")
+    # Not overridable by --force: a disk with something mounted from it is not
+    # the data disk, whatever its name. The installer puts the OS here when
+    # the data disk is the smaller of the two.
+    held = _PROBES.mounts_on(DATA_DEV)
+    if held:
+        die(f"{DATA_DEV} is not a data disk. It holds mounted filesystems:\n"
+            + "".join(f"         {line}\n" for line in held)
+            + "       The OS is probably installed on it. Check 'lsblk'.")
 
     if part_present() and is_luks() and not FORCE:
         die(f"{DATA_PART} already carries a LUKS header. Initialising would\n"
@@ -344,6 +352,13 @@ def cmd_init():
         if not part_present():
             die(f"{DATA_PART} did not appear after partitioning")
     else:
+        # A filesystem other than LUKS means this partition holds something
+        # (an old disk, the wrong disk). Formatting it is a deliberate act.
+        fstype = capture(["blkid", "-p", "-s", "TYPE", "-o", "value", DATA_PART])
+        if fstype and fstype != "crypto_LUKS" and not FORCE:
+            die(f"{DATA_PART} carries a {fstype} filesystem. Check that {DATA_DEV}\n"
+                "       is the data disk ('lsblk'), then run 'data-disk init --force'\n"
+                "       to deliberately reformat it.")
         info(f"{DATA_PART} already exists, reusing the partition")
 
     log(f"luksFormat {DATA_PART}")
@@ -485,6 +500,7 @@ STATUS_EXIT_CODES = {
     "uninitialised": 3,
     "absent": 4,
     "unknown": 5,
+    "occupied": 6,
 }
 
 
@@ -497,6 +513,7 @@ def cmd_status():
             "opened": "data disk: open but not mounted - sudo data-disk unlock",
             "locked": "data disk: locked - sudo data-disk unlock",
             "uninitialised": "data disk: not initialised - sudo data-disk init",
+            "occupied": f"data disk: {DATA_DEV} holds mounted filesystems, not a data disk - lsblk",
             "absent": f"data disk: {DATA_DEV} not attached",
             "unknown": "data disk: state needs root - sudo data-disk status",
         }[state])
@@ -505,6 +522,9 @@ def cmd_status():
     _row("namespace", NAMESPACE)
     _row("state", state)
     _row("device", f"{DATA_DEV} " + ("(present)" if dev_present() else "(absent)"))
+    if state == "occupied":
+        for line in _PROBES.mounts_on(DATA_DEV):
+            _row("in use", line)
     _row("partition", f"{DATA_PART} " + ("(present)" if part_present() else "(absent)"))
     _row("luks", luks_report())
     _row("mapper", f"{DATA_MAPPER} " + ("(open)" if is_open() else "(closed)"))

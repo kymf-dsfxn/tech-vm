@@ -13,9 +13,11 @@ and is ported verbatim; deviations are listed in the port's commit message.
 - Exit codes: 0 success (including a skipped gated service), 1 on `die`.
   `status` (and `status --brief`) instead exits per disk state, so login
   tooling can act on it without parsing text: `unlocked`=0, `locked`=1,
-  `opened`=2, `uninitialised`=3, `absent`=4, `unknown`=5.
-- States: the six-word vocabulary in `platform_node.STATES`, classified
+  `opened`=2, `uninitialised`=3, `absent`=4, `unknown`=5, `occupied`=6.
+- States: the seven-word vocabulary in `platform_node.STATES`, classified
   observable-first.
+- `init` refuses an `occupied` device even with `--force`, and refuses to
+  reuse a partition that carries a filesystem other than LUKS unless `--force`.
 - Output prefixes: `==> ` (log), four spaces (info), `    WARNING: ` to
   stderr (warn), `ERROR: ` to stderr (die).
 - MOTD consumes `status --brief` (one line, `data disk: ...`), followed by
@@ -63,7 +65,7 @@ and is ported verbatim; deviations are listed in the port's commit message.
   failure with a warning.
 - `guest-firstboot.sh` invokes
   `platform_node.py state --device ... --partition ... --mapper ... --mount ...`
-  (one of the six states on stdout) and
+  (one of the seven states on stdout) and
   `platform_node.py marker-name --template ...`.
 - `make-manifest.py` imports `platform_node.STATES` for `--data-state`.
 - systemd: the drop-in conditions test the mount and the rendered config

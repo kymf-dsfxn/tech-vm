@@ -12,8 +12,9 @@ import platform_node as pn  # noqa: E402
 
 
 class FakeProbes:
-    def __init__(self, block=(), readable=(), mounted=(), luks=()):
+    def __init__(self, block=(), readable=(), mounted=(), luks=(), held=()):
         self.block = set(block)
+        self.held = list(held)
         self.readable = set(readable)
         self.mounted = set(mounted)
         self.luks = set(luks)
@@ -29,6 +30,9 @@ class FakeProbes:
 
     def is_luks(self, partition):
         return partition in self.luks
+
+    def mounts_on(self, device):
+        return self.held
 
 
 DEV, PART, MAPPER, MOUNT = ("/dev/sdb", "/dev/sdb1",
@@ -68,10 +72,29 @@ class DiskStateTests(unittest.TestCase):
         probes = FakeProbes(block=[DEV, PART], readable=[PART])
         self.assertEqual(classify(probes), "uninitialised")
 
+    def test_occupied_when_the_os_is_on_it(self):
+        # The canary of 2026-11-16: the installer put / and /boot/efi on the
+        # data disk. Its partition has no LUKS header, yet it is not
+        # uninitialised, because init would format the EFI partition.
+        probes = FakeProbes(block=[DEV, PART], readable=[PART],
+                            held=["/dev/sdb1 on /boot/efi", "/dev/sdb2 on /"])
+        self.assertEqual(classify(probes), "occupied")
+
+    def test_occupied_does_not_need_root(self):
+        probes = FakeProbes(block=[DEV, PART], held=["/dev/sdb2 on /"])
+        self.assertEqual(classify(probes), "occupied")
+
+    def test_unlocked_is_not_occupied(self):
+        # lsblk lists the open mapper's mount under the disk too.
+        probes = FakeProbes(block=[DEV, PART, MAPPER], mounted=[MOUNT],
+                            held=["/dev/mapper/dsfxn_data on /srv/dsfxn"])
+        self.assertEqual(classify(probes), "unlocked")
+
     def test_vocabulary_is_closed(self):
         self.assertEqual(
             pn.STATES,
-            ("absent", "unlocked", "opened", "uninitialised", "unknown", "locked"))
+            ("absent", "unlocked", "opened", "occupied", "uninitialised",
+             "unknown", "locked"))
 
 
 class PlatformEnvTests(unittest.TestCase):

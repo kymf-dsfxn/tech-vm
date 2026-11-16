@@ -90,8 +90,16 @@ The observable states are also tested first. A mounted filesystem means
 `unlocked` and an open mapper means `opened` whatever the header says, and both
 are readable by anyone, so only a disk that is neither needs the header at all.
 
-The state vocabulary is six words - `absent` / `unlocked` / `opened` /
-`uninitialised` / `unknown` / `locked` - and there is exactly one classifier:
+A disk with anything else mounted from it is `occupied`, tested before the
+header for the same reason. This is the OS disk under the data disk's name: the
+autoinstall puts the OS on the smallest disk, so a data disk smaller than the
+core disk gets the OS, and its EFI partition has no LUKS header. Calling that
+`uninitialised` invites `init` onto the EFI partition. `init` refuses an
+`occupied` disk even with `--force`, and `create-vm-instance.py` refuses a new
+data disk that is not larger than the core disk.
+
+The state vocabulary is seven words - `absent` / `unlocked` / `opened` /
+`occupied` / `uninitialised` / `unknown` / `locked` - and there is exactly one classifier:
 `platform_node.py`, used by `data-disk status`, called by `guest-firstboot.sh`
 through its CLI, and imported by the manifest's `--data-state`. It is
 unit-tested without a VM (`00.host-config/common/tests/`).

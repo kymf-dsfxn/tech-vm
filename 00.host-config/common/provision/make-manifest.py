@@ -238,7 +238,7 @@ def main():
     p_fb.add_argument("--data-partition", default="", help="data disk partition")
     p_fb.add_argument("--data-state", default="",
                       choices=[""] + list(platform_node.STATES),
-                      help="data disk state, the six-state vocabulary shared "
+                      help="data disk state, the seven-state vocabulary shared "
                            "with data-disk and guest-firstboot.sh")
     p_fb.add_argument("--luks-name", default="", help="dm-crypt mapper name")
     p_fb.add_argument("--luks-uuid", default="", help="LUKS header UUID")

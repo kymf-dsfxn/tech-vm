@@ -405,6 +405,18 @@ def validate_settings(s, strict=False):
         if not resolved_source.lower().endswith(".vmdk"):
             raise SettingError(f"DataDiskSourcePath must be a .vmdk file: {resolved_source}")
 
+    # The autoinstall puts the OS on the smallest disk (user-data
+    # `match: size: smallest`). A new data disk that is not larger than the
+    # core disk gets the OS instead, and the guest's data-disk then sees the
+    # OS disk at /dev/sdb.
+    if s["DataDiskCount"] >= 1 and not source_path \
+            and s["DataDiskSizeGB"] <= s["CoreDiskSizeGB"]:
+        raise SettingError(
+            f"DataDiskSizeGB ({s['DataDiskSizeGB']}) must be larger than "
+            f"CoreDiskSizeGB ({s['CoreDiskSizeGB']}): the installer puts the OS "
+            "on the smallest disk."
+        )
+
     warnings = []
     if s["CoresPerSocket"] and (s["CpuCount"] % s["CoresPerSocket"]) != 0:
         warnings.append(

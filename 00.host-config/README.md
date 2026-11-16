@@ -33,7 +33,7 @@ common/
     sync-node                  Syncthing replica on that disk: identity/id/
                                render/ensure/marker/status/gui/normalise.
     host-drives                HGFS host drive mounts: status/mount/reset.
-    platform_node.py           Shared library: platform.env, the six-state
+    platform_node.py           Shared library: platform.env, the seven-state
                                classifier, marker/template resolution, the
                                share permission scan.
     image-build-info           Prints identity, timestamp, and with

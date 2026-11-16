@@ -2,7 +2,7 @@
 """platform_node.py - shared library for the platform guest commands.
 
 One home for the conventions that data-disk, sync-node, make-manifest.py and
-guest-firstboot.sh share: /etc/platform.env, the six-state disk vocabulary and
+guest-firstboot.sh share: /etc/platform.env, the seven-state disk vocabulary and
 its classifier, marker-name and folder-id resolution, and the template
 placeholder scanner. Installed beside the commands in /usr/local/bin, staged
 under /opt/vm-init for make-manifest.py. Design:
@@ -16,6 +16,7 @@ Also a small CLI so bash callers share the code instead of duplicating it:
 """
 
 import argparse
+import json
 import os
 import re
 import stat
@@ -25,8 +26,9 @@ import xml.etree.ElementTree as ET
 
 PLATFORM_ENV_PATH = "/etc/platform.env"
 
-# The six-state disk vocabulary, in classifier test order.
-STATES = ("absent", "unlocked", "opened", "uninitialised", "unknown", "locked")
+# The seven-state disk vocabulary, in classifier test order.
+STATES = ("absent", "unlocked", "opened", "occupied", "uninitialised",
+          "unknown", "locked")
 
 # Fallbacks only; the live values come from the rendered config or template.
 MARKER_NAME_DEFAULT = ".dsfxn-share-marker"
@@ -104,6 +106,31 @@ class DiskProbes:
             check=False,
         ).returncode == 0
 
+    def mounts_on(self, device):
+        """Mountpoints (swap shows as [SWAP]) on the device and everything
+        under it. lsblk reads sysfs, so this needs no root."""
+        result = subprocess.run(
+            ["lsblk", "-J", "-p", "-o", "NAME,MOUNTPOINTS", device],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            return []
+        try:
+            tree = json.loads(result.stdout).get("blockdevices", [])
+        except ValueError:
+            return []
+        found = []
+
+        def walk(nodes):
+            for node in nodes:
+                for point in node.get("mountpoints") or []:
+                    if point:
+                        found.append(f"{node['name']} on {point}")
+                walk(node.get("children") or [])
+
+        walk(tree)
+        return found
+
 
 def disk_state(device, partition, mapper, mount, probes=None):
     """One word for the whole disk. Observable states first (mounted/open are
@@ -117,6 +144,11 @@ def disk_state(device, partition, mapper, mount, probes=None):
         return "unlocked"
     if p.is_block_device(mapper):
         return "opened"
+    # Something else is mounted from it: the root or EFI filesystem when the
+    # installer chose this disk, or swap. Not a data disk, and never one to
+    # call uninitialised, because that state invites init.
+    if p.mounts_on(device):
+        return "occupied"
     if not p.is_block_device(partition):
         return "uninitialised"
     if not p.is_readable(partition):
@@ -273,7 +305,7 @@ def _cli(argv):
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_state = sub.add_parser(
-        "state", help="print the six-word disk state (" + " / ".join(STATES) + ")")
+        "state", help="print the disk state (" + " / ".join(STATES) + ")")
     p_state.add_argument("--device", required=True)
     p_state.add_argument("--partition", required=True)
     p_state.add_argument("--mapper", required=True,

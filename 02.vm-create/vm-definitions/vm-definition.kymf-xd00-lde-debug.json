@@ -6,7 +6,7 @@
   "MemoryMB": 4096,
   "CoreDiskSizeGB": 32,
   "DataDiskCount": 1,
-  "DataDiskSizeGB": 16,
+  "DataDiskSizeGB": 64,
   "NetworkType": "nat",
   "NetworkName": null,
   "GuestOs": "ubuntu-64",
